@@ -100,8 +100,21 @@ install_application_files() {
   "$INSTALL_DIR/.venv/bin/pip" install --disable-pip-version-check -r "$INSTALL_DIR/requirements.txt"
 }
 
+set_env_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  if grep -q "^${key}=" "$file"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+  else
+    printf '%s=%s\n' "$key" "$value" >>"$file"
+  fi
+}
+
 write_environment() {
   if [[ -f "$INSTALL_DIR/.env" && -z "$GROQ_API_KEY" && -z "$DEEPSEEK_API_KEY" ]]; then
+    set_env_value "$INSTALL_DIR/.env" MAX_TOOL_ROUNDS 10
+    set_env_value "$INSTALL_DIR/.env" MAX_SEARCH_RESULTS 10
     chmod 0600 "$INSTALL_DIR/.env"
     return
   fi
@@ -117,8 +130,8 @@ write_environment() {
     printf 'DEEPSEEK_API_KEY=%s\n' "$DEEPSEEK_API_KEY"
     printf 'SEARXNG_URL=http://127.0.0.1:%s\n' "$SEARCH_PORT"
     printf 'SCRAPER_URL=http://127.0.0.1:3002\n'
-    printf 'MAX_TOOL_ROUNDS=5\n'
-    printf 'MAX_SEARCH_RESULTS=5\n'
+    printf 'MAX_TOOL_ROUNDS=10\n'
+    printf 'MAX_SEARCH_RESULTS=10\n'
     printf 'HTTP_TIMEOUT=8\n'
     printf 'LLM_TIMEOUT=90\n'
     printf 'JWT_EXPIRE_DAYS=60\n'

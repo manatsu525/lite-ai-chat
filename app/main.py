@@ -6,7 +6,9 @@
 """
 from pathlib import Path
 from typing import Any, List, Optional
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -19,10 +21,13 @@ from .auth import create_token, require_user
 from .config import (
     HOST,
     JWT_EXPIRE_DAYS,
-    MODEL_NAME,
     PORT,
+    default_model_id,
     get_model_config,
+    get_provider_secret,
+    provider_settings_public,
     public_model_options,
+    save_provider_config,
 )
 
 users.init_db()
@@ -60,6 +65,67 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     # 忽略多余字段（tools 等由后端内置）
     max_tokens: Optional[int] = None
+
+
+class ProviderBody(BaseModel):
+    provider_id: str = Field(min_length=1, max_length=40, pattern=r"^[a-zA-Z0-9_-]+$")
+    provider_label: str = Field(min_length=1, max_length=80)
+    api_base: str = Field(min_length=8, max_length=500)
+    api_key: str = Field(default="", max_length=1000)
+    selected_models: List[str] = Field(default_factory=list)
+
+
+def _provider_credentials(body: ProviderBody):
+    parsed = urlparse(body.api_base)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username:
+        raise HTTPException(status_code=400, detail="API 地址必须是有效的 http/https URL")
+    api_key = body.api_key.strip()
+    existing = get_provider_secret(body.provider_id)
+    if not api_key and existing:
+        api_key = existing.get("api_key") or ""
+    if not api_key:
+        raise HTTPException(status_code=400, detail="请输入 API Key")
+    return body.api_base.rstrip("/"), api_key
+
+
+async def _fetch_provider_models(api_base: str, api_key: str):
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(25.0, connect=5.0),
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(
+                f"{api_base}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"无法连接模型接口：{type(exc).__name__}",
+        )
+    if response.status_code >= 400:
+        try:
+            payload = response.json()
+            message = (payload.get("error") or {}).get("message") or payload.get("detail")
+        except Exception:
+            message = ""
+        raise HTTPException(
+            status_code=400,
+            detail=f"API 测试失败（HTTP {response.status_code}）"
+            + (f"：{str(message)[:300]}" if message else ""),
+        )
+    try:
+        payload = response.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="模型接口未返回有效 JSON")
+    models = []
+    for item in payload.get("data") or []:
+        model_id = str(item.get("id") or "").strip()
+        if model_id and model_id not in models:
+            models.append(model_id)
+    if not models:
+        raise HTTPException(status_code=400, detail="API 测试成功，但未读取到模型列表")
+    return sorted(models)[:500]
 
 
 # ---------- 认证 ----------
@@ -125,6 +191,42 @@ def me(user: dict = Depends(require_user)):
     return {"id": user["id"], "username": user["username"]}
 
 
+# ---------- API 与模型设置 ----------
+@app.get("/api/settings/providers")
+def provider_settings(user: dict = Depends(require_user)):
+    return {"providers": provider_settings_public()}
+
+
+@app.post("/api/settings/providers/test")
+async def test_provider(body: ProviderBody, user: dict = Depends(require_user)):
+    api_base, api_key = _provider_credentials(body)
+    models = await _fetch_provider_models(api_base, api_key)
+    return {"ok": True, "models": models}
+
+
+@app.post("/api/settings/providers")
+async def save_provider(body: ProviderBody, user: dict = Depends(require_user)):
+    api_base, api_key = _provider_credentials(body)
+    available_models = await _fetch_provider_models(api_base, api_key)
+    selected = list(dict.fromkeys(x.strip() for x in body.selected_models if x.strip()))
+    invalid = [model for model in selected if model not in available_models]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"模型已不可用：{invalid[0]}")
+    if not selected:
+        raise HTTPException(status_code=400, detail="请至少选择一个模型")
+    save_provider_config(
+        {
+            "provider_id": body.provider_id,
+            "provider_label": body.provider_label.strip(),
+            "provider": "deepseek" if body.provider_id == "deepseek" else body.provider_id,
+            "api_base": api_base,
+            "api_key": api_key,
+            "models": selected,
+        }
+    )
+    return {"ok": True, "models": public_model_options()}
+
+
 # ---------- OpenAI 兼容接口 ----------
 @app.post("/v1/chat/completions")
 async def chat_completions(body: ChatRequest, user: dict = Depends(require_user)):
@@ -137,7 +239,7 @@ async def chat_completions(body: ChatRequest, user: dict = Depends(require_user)
     if not clean:
         raise HTTPException(status_code=400, detail="messages 不能为空")
 
-    model = body.model or MODEL_NAME
+    model = body.model or default_model_id()
     if not get_model_config(model):
         raise HTTPException(status_code=400, detail=f"模型不可用: {model}")
 
@@ -165,7 +267,7 @@ async def chat_completions(body: ChatRequest, user: dict = Depends(require_user)
 def list_models(user: dict = Depends(require_user)):
     return {
         "object": "list",
-        "default": MODEL_NAME,
+        "default": default_model_id(),
         "data": public_model_options(),
     }
 

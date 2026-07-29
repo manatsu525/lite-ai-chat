@@ -200,6 +200,76 @@
       text-align: center;
       line-height: 1.7;
     }
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      padding: 1rem;
+      background: rgba(0, 0, 0, 0.72);
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
+    .settings-card {
+      width: min(640px, 100%);
+      max-height: calc(100vh - 2rem);
+      overflow-y: auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.1rem;
+    }
+    .settings-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+    .settings-head h2 { font-size: 1.1rem; }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    .settings-grid .wide { grid-column: 1 / -1; }
+    .settings-actions {
+      display: flex;
+      gap: 0.6rem;
+      margin-top: 0.9rem;
+      flex-wrap: wrap;
+    }
+    .settings-note, .settings-status {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-top: 0.55rem;
+      line-height: 1.5;
+    }
+    .settings-status.ok { color: var(--ok); }
+    .settings-status.bad { color: var(--danger); }
+    .model-list {
+      margin-top: 0.55rem;
+      max-height: 230px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.35rem;
+    }
+    .model-option {
+      display: flex;
+      gap: 0.55rem;
+      align-items: flex-start;
+      padding: 0.45rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      word-break: break-all;
+    }
+    .model-option:hover { background: var(--bg); }
+    .model-option input { width: auto; margin-top: 0.18rem; }
+    @media (max-width: 600px) {
+      .settings-grid { grid-template-columns: 1fr; }
+      .settings-grid .wide { grid-column: auto; }
+    }
   </style>
 </head>
 <body>
@@ -228,6 +298,7 @@
       <div class="user-meta">
         <select id="model-select" aria-label="选择模型" title="选择模型"></select>
         <span id="who"></span>
+        <button class="ghost" id="settings-btn" type="button">API / 模型</button>
         <button class="ghost" id="clear-btn" type="button">清空</button>
         <button class="ghost" id="logout-btn" type="button">退出</button>
       </div>
@@ -244,6 +315,54 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="settings-modal" role="dialog" aria-modal="true">
+    <div class="settings-card">
+      <div class="settings-head">
+        <h2>API 与模型设置</h2>
+        <button class="ghost" id="settings-close" type="button">关闭</button>
+      </div>
+      <div class="settings-grid">
+        <div class="field">
+          <label for="provider-select">提供商配置</label>
+          <select id="provider-select"></select>
+        </div>
+        <div class="field">
+          <label for="provider-id">配置标识</label>
+          <input id="provider-id" placeholder="例如 groq" />
+        </div>
+        <div class="field">
+          <label for="provider-label">显示名称</label>
+          <input id="provider-label" placeholder="例如 Groq" />
+        </div>
+        <div class="field">
+          <label for="provider-key">API Key</label>
+          <input id="provider-key" type="password" autocomplete="off" placeholder="留空则使用已保存密钥" />
+        </div>
+        <div class="field wide">
+          <label for="provider-base">OpenAI 兼容 API 地址</label>
+          <input id="provider-base" placeholder="https://api.example.com/v1" />
+        </div>
+      </div>
+      <div class="settings-actions">
+        <button id="provider-test" type="button">测试 API 并读取模型</button>
+      </div>
+      <div class="settings-status" id="provider-status"></div>
+      <div id="models-panel" style="display:none">
+        <div class="field" style="margin-top:0.9rem">
+          <label for="model-filter">筛选模型</label>
+          <input id="model-filter" placeholder="输入模型名称…" />
+        </div>
+        <div class="model-list" id="provider-models"></div>
+        <div class="settings-actions">
+          <button id="provider-save" type="button">保存所选模型</button>
+        </div>
+      </div>
+      <p class="settings-note">
+        API Key 只写入服务器的受限配置文件，页面不会读取或回显完整密钥。保存前会再次验证 API 和模型列表。
+      </p>
+    </div>
+  </div>
+
   <script>
     const TOKEN_KEY = "lite_ai_token";
     const USER_KEY = "lite_ai_user";
@@ -251,6 +370,9 @@
     let history = []; // {role, content}
     let busy = false;
     let isBootstrap = false;
+    let providerSettings = [];
+    let testedModels = [];
+    let savedProviderModels = [];
 
     const $ = (id) => document.getElementById(id);
 
@@ -326,6 +448,9 @@
         const selected = models.some((m) => m.id === saved) ? saved : payload.default;
         select.value = selected || (models[0] && models[0].id) || "";
         if (select.value) localStorage.setItem(MODEL_KEY, select.value);
+        if (!models.length) {
+          select.innerHTML = '<option value="">请先配置 API</option>';
+        }
       } catch (e) {
         select.innerHTML = '<option value="">模型不可用</option>';
       } finally {
@@ -336,6 +461,172 @@
     $("model-select").addEventListener("change", (e) => {
       localStorage.setItem(MODEL_KEY, e.target.value);
     });
+
+    function providerPayload() {
+      return {
+        provider_id: $("provider-id").value.trim(),
+        provider_label: $("provider-label").value.trim(),
+        api_base: $("provider-base").value.trim(),
+        api_key: $("provider-key").value.trim(),
+        selected_models: [],
+      };
+    }
+
+    function setProviderStatus(message, kind = "") {
+      const el = $("provider-status");
+      el.textContent = message;
+      el.className = "settings-status " + kind;
+    }
+
+    function renderProviderModels(models, selected = []) {
+      testedModels = models.slice();
+      const selectedSet = new Set(selected);
+      const list = $("provider-models");
+      list.innerHTML = "";
+      for (const model of models) {
+        const label = document.createElement("label");
+        label.className = "model-option";
+        label.dataset.model = model.toLowerCase();
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = model;
+        checkbox.checked = selectedSet.has(model);
+        const text = document.createElement("span");
+        text.textContent = model;
+        label.append(checkbox, text);
+        list.appendChild(label);
+      }
+      $("models-panel").style.display = models.length ? "block" : "none";
+      $("model-filter").value = "";
+    }
+
+    function applyProvider(providerId) {
+      const item = providerSettings.find((p) => p.provider_id === providerId);
+      if (item) {
+        $("provider-id").value = item.provider_id;
+        $("provider-label").value = item.provider_label || item.provider_id;
+        $("provider-base").value = item.api_base || "";
+        $("provider-key").value = "";
+        $("provider-key").placeholder = item.configured
+          ? "已保存 " + (item.api_key_masked || "密钥") + "；留空保持不变"
+          : "输入 API Key";
+        savedProviderModels = (item.models || []).slice();
+        renderProviderModels([], []);
+        setProviderStatus(item.configured ? "已读取服务器配置，请测试 API 获取最新模型。" : "");
+      } else {
+        $("provider-id").value = "custom";
+        $("provider-label").value = "Custom";
+        $("provider-base").value = "";
+        $("provider-key").value = "";
+        $("provider-key").placeholder = "输入 API Key";
+        savedProviderModels = [];
+        renderProviderModels([], []);
+        setProviderStatus("");
+      }
+    }
+
+    async function openSettings() {
+      $("settings-modal").classList.add("open");
+      setProviderStatus("正在读取配置…");
+      try {
+        const res = await api("/api/settings/providers");
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "读取配置失败");
+        providerSettings = data.providers || [];
+        const select = $("provider-select");
+        select.innerHTML = "";
+        for (const item of providerSettings) {
+          const option = document.createElement("option");
+          option.value = item.provider_id;
+          option.textContent = item.provider_label || item.provider_id;
+          select.appendChild(option);
+        }
+        const custom = document.createElement("option");
+        custom.value = "__custom__";
+        custom.textContent = "其他 OpenAI 兼容接口";
+        select.appendChild(custom);
+        applyProvider((providerSettings[0] || {}).provider_id || "__custom__");
+      } catch (e) {
+        setProviderStatus(e.message, "bad");
+      }
+    }
+
+    $("settings-btn").onclick = openSettings;
+    $("settings-close").onclick = () => {
+      $("provider-key").value = "";
+      $("settings-modal").classList.remove("open");
+    };
+    $("settings-modal").addEventListener("click", (e) => {
+      if (e.target === $("settings-modal")) $("settings-close").click();
+    });
+    $("provider-select").addEventListener("change", (e) => applyProvider(e.target.value));
+
+    $("provider-test").onclick = async () => {
+      const body = providerPayload();
+      if (!body.provider_id || !body.provider_label || !body.api_base) {
+        setProviderStatus("请完整填写配置标识、显示名称和 API 地址。", "bad");
+        return;
+      }
+      $("provider-test").disabled = true;
+      setProviderStatus("正在测试 API 并读取模型…");
+      try {
+        const res = await api("/api/settings/providers/test", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "API 测试失败");
+        const selected = savedProviderModels.filter((m) => data.models.includes(m));
+        renderProviderModels(data.models || [], selected.length ? selected : data.models.slice(0, 1));
+        setProviderStatus("连接成功，读取到 " + data.models.length + " 个模型。请选择后保存。", "ok");
+      } catch (e) {
+        testedModels = [];
+        renderProviderModels([], []);
+        setProviderStatus(e.message, "bad");
+      } finally {
+        $("provider-test").disabled = false;
+      }
+    };
+
+    $("model-filter").addEventListener("input", (e) => {
+      const value = e.target.value.trim().toLowerCase();
+      for (const item of $("provider-models").children) {
+        item.style.display = !value || item.dataset.model.includes(value) ? "flex" : "none";
+      }
+    });
+
+    $("provider-save").onclick = async () => {
+      if (!testedModels.length) {
+        setProviderStatus("请先测试 API 并读取模型。", "bad");
+        return;
+      }
+      const body = providerPayload();
+      body.selected_models = Array.from(
+        $("provider-models").querySelectorAll('input[type="checkbox"]:checked')
+      ).map((el) => el.value);
+      if (!body.selected_models.length) {
+        setProviderStatus("请至少选择一个模型。", "bad");
+        return;
+      }
+      $("provider-save").disabled = true;
+      setProviderStatus("正在验证并保存…");
+      try {
+        const res = await api("/api/settings/providers", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "保存失败");
+        $("provider-key").value = "";
+        setProviderStatus("保存成功，聊天模型列表已更新。", "ok");
+        await loadModels();
+        setTimeout(() => $("settings-close").click(), 700);
+      } catch (e) {
+        setProviderStatus(e.message, "bad");
+      } finally {
+        $("provider-save").disabled = false;
+      }
+    };
 
     $("auth-btn").onclick = async () => {
       const username = $("username").value.trim();
@@ -443,7 +734,7 @@
       let gotContent = false;
       const controller = new AbortController();
       const selectedModel = $("model-select").value || "";
-      const requestTimeout = selectedModel.startsWith("deepseek-") ? 180000 : 120000;
+      const requestTimeout = selectedModel.startsWith("deepseek::") ? 180000 : 120000;
       const requestTimer = setTimeout(() => controller.abort(), requestTimeout);
 
       try {

@@ -21,7 +21,7 @@ logger = logging.getLogger("lite-ai-chat.agent")
 _TOOL_EXEC_TIMEOUT = 15.0
 _WEB_SEARCH_TIMEOUT = 60.0
 _HEARTBEAT_INTERVAL = 5.0
-_MAX_EXTERNAL_SEARCHES = 3
+_MAX_EXTERNAL_SEARCHES = 5
 
 SYSTEM_PROMPT = f"""你是一个有用的 AI 助手，可以使用工具获取最新网络信息。
 
@@ -173,7 +173,7 @@ async def _call_llm_with_model(messages: List[dict], model: str, with_tools: boo
         raise RuntimeError(f"模型未配置或不可用: {model}")
 
     body: Dict[str, Any] = {
-        "model": model,
+        "model": model_config["model_id"],
         "messages": messages,
         "stream": False,
     }
@@ -525,7 +525,7 @@ async def _call_llm_final_stream(messages: List[dict], model: str, cid: str) -> 
 
     # 清理历史里可能让上游困惑的 tool 结构：保留，但去掉 tools 参数
     body = {
-        "model": model,
+        "model": model_config["model_id"],
         "messages": messages,
         "stream": True,
     }
