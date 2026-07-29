@@ -22,6 +22,7 @@ from .auth import create_token, require_user
 from .config import (
     HOST,
     JWT_EXPIRE_DAYS,
+    LLM_TIMEOUT,
     PORT,
     default_model_id,
     delete_provider_config,
@@ -153,7 +154,7 @@ async def _test_provider_model(api_base: str, api_key: str, model_id: str):
     """对未出现在 /models 的手填模型发起最小聊天请求验证。"""
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(45.0, connect=5.0),
+            timeout=httpx.Timeout(LLM_TIMEOUT, connect=5.0),
             follow_redirects=True,
         ) as client:
             response = await client.post(

@@ -39,17 +39,9 @@ SYSTEM_PROMPT = f"""你是一个有用的 AI 助手，可以使用工具获取�
 9. “今年”“今天”等相对日期必须以上面的当前日期为准。"""
 
 
-def _llm_round_timeout(model: str) -> float:
-    config = get_model_config(model)
-    provider = config.get("provider") if config else ""
-    if provider == "groq":
-        provider_cap = 60.0
-    elif provider == "deepseek":
-        provider_cap = 150.0
-    else:
-        # 自定义 OpenAI 兼容提供商（如 Agnes）往往首 token 较慢。
-        provider_cap = 180.0
-    return max(5.0, min(float(LLM_TIMEOUT), provider_cap))
+def _llm_round_timeout(_model: str) -> float:
+    """所有提供商使用同一个模型响应上限。"""
+    return max(5.0, float(LLM_TIMEOUT))
 
 # 匹配 Groq failed_generation 里的畸形调用，例如：
 # <function=web_search{"query":"x"}</function>
@@ -279,7 +271,7 @@ def _tool_signature(tool_call: dict) -> Tuple[str, str]:
 
 
 def _limit_external_searches(tool_calls: List[dict], used: int) -> List[dict]:
-    """每个回答最多允许三次外部搜索，抓取工具不计入此额度。"""
+    """每个回答最多允许五次外部搜索，抓取工具不计入此额度。"""
     remaining = max(0, _MAX_EXTERNAL_SEARCHES - used)
     kept = []
     for tc in tool_calls:

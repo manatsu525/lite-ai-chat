@@ -115,7 +115,7 @@ write_environment() {
   if [[ -f "$INSTALL_DIR/.env" && -z "$GROQ_API_KEY" && -z "$DEEPSEEK_API_KEY" ]]; then
     set_env_value "$INSTALL_DIR/.env" MAX_TOOL_ROUNDS 10
     set_env_value "$INSTALL_DIR/.env" MAX_SEARCH_RESULTS 10
-    set_env_value "$INSTALL_DIR/.env" LLM_TIMEOUT 180
+    set_env_value "$INSTALL_DIR/.env" LLM_TIMEOUT 1200
     chmod 0600 "$INSTALL_DIR/.env"
     return
   fi
@@ -134,7 +134,7 @@ write_environment() {
     printf 'MAX_TOOL_ROUNDS=10\n'
     printf 'MAX_SEARCH_RESULTS=10\n'
     printf 'HTTP_TIMEOUT=8\n'
-    printf 'LLM_TIMEOUT=180\n'
+    printf 'LLM_TIMEOUT=1200\n'
     printf 'JWT_EXPIRE_DAYS=60\n'
     printf 'JWT_SECRET=%s\n' "$jwt_secret"
     printf 'HOST=0.0.0.0\n'
