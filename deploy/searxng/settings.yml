@@ -1,0 +1,40 @@
+use_default_settings: true
+
+general:
+  instance_name: "Lite AI Chat Search"
+  debug: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "zh-CN"
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "CHANGE_ME_AT_INSTALL"
+  limiter: false
+  image_proxy: false
+  bind_address: "127.0.0.1"
+  port: 8888
+
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  pool_connections: 30
+  pool_maxsize: 15
+
+# 默认配置把多种通用/中文引擎关闭了；在本机聚合层显式启用。
+engines:
+  - name: google
+    inactive: false
+  - name: bing
+    disabled: false
+    base_url: "https://cn.bing.com"
+  - name: baidu
+    disabled: false
+  - name: sogou
+    disabled: false
+  - name: 360search
+    disabled: false
