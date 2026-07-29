@@ -211,8 +211,8 @@
       font-size: 0.88em;
     }
     .msg .content pre {
-      margin: 0.6rem 0;
-      padding: 0.8rem;
+      margin: 0;
+      padding: 2.7rem 0.8rem 0.8rem;
       overflow-x: auto;
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -223,6 +223,36 @@
       border: 0;
       background: transparent;
       white-space: pre;
+    }
+    .code-block {
+      position: relative;
+      margin: 0.6rem 0;
+    }
+    .code-download {
+      position: absolute;
+      top: 0.45rem;
+      right: 0.45rem;
+      z-index: 1;
+      display: inline-flex;
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      background: rgba(23, 26, 33, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .code-download:hover {
+      color: var(--text);
+      background: var(--panel);
+      border-color: var(--muted);
+    }
+    .code-download svg {
+      width: 16px;
+      height: 16px;
+      pointer-events: none;
     }
     .table-wrap {
       max-width: 100%;
@@ -1036,7 +1066,7 @@
         if (/^```/.test(trimmed)) {
           flushParagraph();
           closeList();
-          const language = trimmed.slice(3).trim();
+          const language = trimmed.slice(3).trim().split(/\s+/)[0] || "";
           const code = [];
           i++;
           while (i < lines.length && !/^```/.test(lines[i].trim())) {
@@ -1046,7 +1076,14 @@
           const languageClass = language
             ? ' class="language-' + escapeHtml(language.replace(/[^a-zA-Z0-9_-]/g, "")) + '"'
             : "";
-          out.push("<pre><code" + languageClass + ">" + escapeHtml(code.join("\n")) + "</code></pre>");
+          const safeLanguage = language.toLowerCase().replace(/[^a-z0-9_+#.-]/g, "");
+          out.push(
+            '<div class="code-block" data-language="' + escapeHtml(safeLanguage) + '">' +
+            '<button class="code-download" type="button" title="下载代码" aria-label="下载代码">' +
+            '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2">' +
+            '<path d="M12 3v12m0 0 5-5m-5 5-5-5M5 21h14"></path></svg></button>' +
+            "<pre><code" + languageClass + ">" + escapeHtml(code.join("\n")) + "</code></pre></div>"
+          );
           continue;
         }
 
@@ -1126,6 +1163,39 @@
       closeList();
       return out.join("");
     }
+
+    const CODE_EXTENSIONS = {
+      python: "py", py: "py", javascript: "js", js: "js",
+      typescript: "ts", ts: "ts", jsx: "jsx", tsx: "tsx",
+      bash: "sh", shell: "sh", sh: "sh", zsh: "sh",
+      html: "html", css: "css", json: "json", yaml: "yml", yml: "yml",
+      xml: "xml", sql: "sql", java: "java", kotlin: "kt", c: "c",
+      cpp: "cpp", "c++": "cpp", csharp: "cs", "c#": "cs",
+      go: "go", rust: "rs", ruby: "rb", php: "php", swift: "swift",
+      markdown: "md", md: "md", dockerfile: "Dockerfile",
+    };
+
+    $("messages").addEventListener("click", (event) => {
+      const button = event.target.closest(".code-download");
+      if (!button) return;
+      const block = button.closest(".code-block");
+      const code = block && block.querySelector("code");
+      if (!code) return;
+      const language = (block.dataset.language || "").toLowerCase();
+      const extension = CODE_EXTENSIONS[language] || "txt";
+      const filename = extension === "Dockerfile"
+        ? "Dockerfile"
+        : "code-" + Date.now() + "." + extension;
+      const blob = new Blob([code.textContent], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
 
     function setAssistantContent(element, content) {
       element.innerHTML = renderMarkdown(content);
