@@ -49,6 +49,33 @@ def init_db() -> None:
                 ON conversations(user_id, updated_at DESC)
                 """
             )
+            c.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_jobs (
+                    id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    status_message TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                        DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    updated_at TEXT NOT NULL
+                        DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+                """
+            )
+            c.execute(
+                """
+                UPDATE chat_jobs
+                SET status = 'interrupted',
+                    error = '服务重启，后台任务已中断',
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE status IN ('queued', 'running', 'stopping')
+                """
+            )
             c.commit()
 
 
@@ -175,3 +202,85 @@ def delete_conversation(user_id: int, conversation_id: str) -> None:
                 (user_id, conversation_id),
             )
             c.commit()
+
+
+def create_chat_job(
+    job_id: str,
+    user_id: int,
+    conversation_id: str,
+    model: str,
+) -> None:
+    with _lock:
+        with _conn() as c:
+            c.execute(
+                """
+                INSERT INTO chat_jobs
+                    (id, user_id, conversation_id, model, status)
+                VALUES (?, ?, ?, ?, 'queued')
+                """,
+                (job_id, user_id, conversation_id, model),
+            )
+            c.execute(
+                """
+                DELETE FROM chat_jobs
+                WHERE user_id = ? AND id NOT IN (
+                    SELECT id FROM chat_jobs
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 30
+                )
+                """,
+                (user_id, user_id),
+            )
+            c.commit()
+
+
+def update_chat_job(
+    job_id: str,
+    status: str,
+    content: str = "",
+    status_message: str = "",
+    error: str = "",
+) -> None:
+    with _lock:
+        with _conn() as c:
+            c.execute(
+                """
+                UPDATE chat_jobs
+                SET status = ?, content = ?, status_message = ?, error = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (status, content, status_message, error, job_id),
+            )
+            c.commit()
+
+
+def get_chat_job(user_id: int, job_id: str) -> Optional[dict]:
+    with _conn() as c:
+        row = c.execute(
+            """
+            SELECT id, conversation_id, model, status, content,
+                   status_message, error, created_at, updated_at
+            FROM chat_jobs
+            WHERE user_id = ? AND id = ?
+            """,
+            (user_id, job_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_active_chat_job(user_id: int) -> Optional[dict]:
+    with _conn() as c:
+        row = c.execute(
+            """
+            SELECT id, conversation_id, model, status, content,
+                   status_message, error, created_at, updated_at
+            FROM chat_jobs
+            WHERE user_id = ? AND status IN ('queued', 'running', 'stopping')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else None

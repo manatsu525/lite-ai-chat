@@ -378,27 +378,33 @@ async def run_agent_stream(messages: List[dict], model: Optional[str] = None) ->
         resolve_task = asyncio.create_task(_resolve_round(msgs, use_model))
         started = time.monotonic()
         round_timeout = _llm_round_timeout(use_model)
-        while True:
-            try:
-                message, tool_calls, err = await asyncio.wait_for(
-                    asyncio.shield(resolve_task),
-                    timeout=_HEARTBEAT_INTERVAL,
-                )
-                break
-            except asyncio.TimeoutError:
-                elapsed = time.monotonic() - started
-                if elapsed >= round_timeout:
-                    resolve_task.cancel()
-                    await asyncio.gather(resolve_task, return_exceptions=True)
-                    message, tool_calls = None, []
-                    err = f"上游模型响应超过 {round_timeout:.0f} 秒"
+        try:
+            while True:
+                try:
+                    message, tool_calls, err = await asyncio.wait_for(
+                        asyncio.shield(resolve_task),
+                        timeout=_HEARTBEAT_INTERVAL,
+                    )
                     break
-                heartbeat = _chunk(model=use_model, cid=cid)
-                heartbeat["status"] = {
-                    "type": "thinking",
-                    "message": f"仍在等待模型响应…（{int(elapsed)} 秒）",
-                }
-                yield _sse(heartbeat)
+                except asyncio.TimeoutError:
+                    elapsed = time.monotonic() - started
+                    if elapsed >= round_timeout:
+                        resolve_task.cancel()
+                        await asyncio.gather(resolve_task, return_exceptions=True)
+                        message, tool_calls = None, []
+                        err = f"上游模型响应超过 {round_timeout:.0f} 秒"
+                        break
+                    heartbeat = _chunk(model=use_model, cid=cid)
+                    heartbeat["status"] = {
+                        "type": "thinking",
+                        "message": f"仍在等待模型响应…（{int(elapsed)} 秒）",
+                    }
+                    yield _sse(heartbeat)
+        except asyncio.CancelledError:
+            # 后台任务被用户停止时，也要取消被 shield 保护的上游 HTTP 请求。
+            resolve_task.cancel()
+            await asyncio.gather(resolve_task, return_exceptions=True)
+            raise
         if err:
             yield _sse(_chunk(content=f"\n[上游模型错误] {err}", finish_reason="stop", model=use_model, cid=cid))
             yield "data: [DONE]\n\n"

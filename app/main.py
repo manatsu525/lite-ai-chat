@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import users
+from . import jobs, users
 from .agent import run_agent_stream, run_agent_sync
 from .auth import create_token, require_user
 from .config import (
@@ -67,6 +67,13 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     # 忽略多余字段（tools 等由后端内置）
     max_tokens: Optional[int] = None
+
+
+class ChatJobBody(BaseModel):
+    model: Optional[str] = None
+    messages: List[ChatMessage] = Field(min_length=1, max_length=100)
+    conversation_id: str = Field(min_length=8, max_length=64)
+    title: str = Field(default="新对话", max_length=100)
 
 
 class ProviderBody(BaseModel):
@@ -348,6 +355,61 @@ def delete_conversation(
         raise HTTPException(status_code=400, detail="无效的对话标识")
     users.delete_conversation(user["id"], conversation_id)
     return {"ok": True}
+
+
+# ---------- 与页面连接解耦的后台生成 ----------
+@app.post("/api/chat/jobs")
+async def create_chat_job(body: ChatJobBody, user: dict = Depends(require_user)):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{8,64}", body.conversation_id):
+        raise HTTPException(status_code=400, detail="无效的对话标识")
+    clean = []
+    total_chars = 0
+    for message in body.messages:
+        if message.role not in ("user", "assistant"):
+            continue
+        content = message.content or ""
+        total_chars += len(content)
+        if total_chars > 1_000_000:
+            raise HTTPException(status_code=413, detail="对话内容过大")
+        clean.append({"role": message.role, "content": content})
+    if not clean:
+        raise HTTPException(status_code=400, detail="messages 不能为空")
+    model = body.model or default_model_id()
+    if not get_model_config(model):
+        raise HTTPException(status_code=400, detail=f"模型不可用: {model}")
+    title = body.title.strip()[:100] or "新对话"
+    return await jobs.start_job(
+        user["id"],
+        body.conversation_id,
+        title,
+        clean,
+        model,
+    )
+
+
+@app.get("/api/chat/jobs/active")
+def active_chat_job(user: dict = Depends(require_user)):
+    return {"job": jobs.get_active_job(user["id"])}
+
+
+@app.get("/api/chat/jobs/{job_id}")
+def chat_job(job_id: str, user: dict = Depends(require_user)):
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(status_code=400, detail="无效的任务标识")
+    job = jobs.get_job(user["id"], job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return job
+
+
+@app.post("/api/chat/jobs/{job_id}/stop")
+async def stop_chat_job(job_id: str, user: dict = Depends(require_user)):
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(status_code=400, detail="无效的任务标识")
+    job = await jobs.stop_job(user["id"], job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return job
 
 
 # ---------- OpenAI 兼容接口 ----------

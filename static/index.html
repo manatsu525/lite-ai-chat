@@ -401,9 +401,10 @@
     <div class="composer">
       <div class="composer-inner">
         <textarea id="input" rows="1" placeholder="输入消息… (Enter 发送，Shift+Enter 换行)"></textarea>
+        <button class="danger" id="stop-btn" type="button" style="display:none">停止</button>
         <button id="send-btn" type="button">发送</button>
       </div>
-      <div class="hint">登录 Token 保存在本地，默认 60 天有效 · 后端自动多轮工具调用</div>
+      <div class="hint">生成在服务器后台继续，刷新、锁屏或关闭页面后可回来查看 · 后端自动多轮工具调用</div>
     </div>
   </div>
 
@@ -472,6 +473,8 @@
     let savedProviderModels = [];
     let conversations = [];
     let currentConversationId = "";
+    let currentJobId = "";
+    let jobPollTimer = null;
 
     const $ = (id) => document.getElementById(id);
 
@@ -521,12 +524,12 @@
       $("chat-view").style.display = "none";
     }
 
-    function showChat(username) {
+    async function showChat(username) {
       $("login-view").style.display = "none";
       $("chat-view").style.display = "flex";
       $("who").textContent = username || localStorage.getItem(USER_KEY) || "";
-      loadModels();
-      loadConversations();
+      await Promise.all([loadModels(), loadConversations()]);
+      await resumeActiveJob();
     }
 
     async function loadModels() {
@@ -1161,6 +1164,112 @@
       }
     });
     $("send-btn").onclick = send;
+    $("stop-btn").onclick = stopGeneration;
+
+    function setBusyState(value) {
+      busy = value;
+      $("send-btn").disabled = value;
+      $("model-select").disabled = value;
+      $("conversation-select").disabled = value;
+      $("new-chat-btn").disabled = value;
+      $("delete-chat-btn").disabled = value;
+      $("clear-btn").disabled = value;
+      $("settings-btn").disabled = value;
+      $("stop-btn").style.display = value ? "" : "none";
+      $("stop-btn").disabled = false;
+    }
+
+    function clearJobPoll() {
+      if (jobPollTimer) clearTimeout(jobPollTimer);
+      jobPollTimer = null;
+    }
+
+    function showJobInConversation(job) {
+      const item = conversations.find((entry) => entry.id === job.conversation_id);
+      if (item) {
+        currentConversationId = item.id;
+        history = (item.messages || []).map((message) => ({
+          role: message.role,
+          content: message.content || "",
+        }));
+        renderConversationSelect();
+        renderConversation();
+      }
+      const contentEl = appendMsg("assistant", job.content || "思考中…");
+      const statusEl = appendMsg(
+        "status",
+        job.status_message || "后台生成中…",
+        true,
+      );
+      return { contentEl, statusEl };
+    }
+
+    async function resumeActiveJob() {
+      try {
+        const res = await api("/api/chat/jobs/active");
+        if (!res.ok) return;
+        const payload = await res.json();
+        if (!payload.job) {
+          // 避免任务恰好在首次加载历史后完成而漏掉最后一条回答。
+          await loadConversations();
+          return;
+        }
+        currentJobId = payload.job.id;
+        setBusyState(true);
+        const ui = showJobInConversation(payload.job);
+        pollJob(payload.job.id, ui.contentEl, ui.statusEl, true);
+      } catch (_) {}
+    }
+
+    async function pollJob(jobId, contentEl, statusEl, immediate = false) {
+      clearJobPoll();
+      const poll = async () => {
+        if (currentJobId !== jobId) return;
+        try {
+          const res = await api("/api/chat/jobs/" + encodeURIComponent(jobId));
+          if (res.status === 401) {
+            clearAuth();
+            location.reload();
+            return;
+          }
+          if (!res.ok) throw new Error("任务状态读取失败");
+          const job = await res.json();
+          setAssistantContent(contentEl, job.content || "思考中…");
+          const active = ["queued", "running", "stopping"].includes(job.status);
+          if (active) {
+            statusEl.textContent = job.status_message || (
+              job.status === "stopping" ? "正在停止…" : "后台生成中…"
+            );
+            jobPollTimer = setTimeout(poll, 900);
+            return;
+          }
+          const statusRow = statusEl.closest(".msg");
+          if (statusRow) statusRow.remove();
+          currentJobId = "";
+          clearJobPoll();
+          setBusyState(false);
+          await loadConversations();
+          $("input").focus();
+        } catch (_) {
+          // 页面离线或锁屏时不影响服务器任务；恢复联网后继续查询。
+          if (currentJobId === jobId) jobPollTimer = setTimeout(poll, 1800);
+        }
+      };
+      jobPollTimer = setTimeout(poll, immediate ? 0 : 700);
+    }
+
+    async function stopGeneration() {
+      if (!currentJobId) return;
+      $("stop-btn").disabled = true;
+      try {
+        await api(
+          "/api/chat/jobs/" + encodeURIComponent(currentJobId) + "/stop",
+          { method: "POST" },
+        );
+      } catch (_) {
+        $("stop-btn").disabled = false;
+      }
+    }
 
     async function send() {
       if (busy) return;
@@ -1171,127 +1280,36 @@
 
       history.push({ role: "user", content: text });
       appendMsg("user", text);
-      busy = true;
-      $("send-btn").disabled = true;
-      $("model-select").disabled = true;
+      setBusyState(true);
       await persistConversation();
 
       const contentEl = appendMsg("assistant", "思考中…");
-      let full = "";
-      let statusEl = null;
-      let gotContent = false;
-      const controller = new AbortController();
-      const selectedModel = $("model-select").value || "";
-      let requestTimer = null;
-      const resetRequestTimer = () => {
-        clearTimeout(requestTimer);
-        // 只限制“完全没有任何数据”的时间；后端心跳会持续续期。
-        requestTimer = setTimeout(() => controller.abort(), 90000);
-      };
-      resetRequestTimer();
-      const clearStatus = () => {
-        if (statusEl) {
-          const row = statusEl.closest(".msg");
-          if (row) row.remove();
-          statusEl = null;
-        }
-      };
-
+      const statusEl = appendMsg("status", "正在提交后台任务…", true);
       try {
-        const res = await api("/v1/chat/completions", {
+        const res = await api("/api/chat/jobs", {
           method: "POST",
-          signal: controller.signal,
           body: JSON.stringify({
-            model: selectedModel || null,
+            model: $("model-select").value || null,
             messages: history.map((m) => ({ role: m.role, content: m.content })),
-            stream: true,
+            conversation_id: currentConversationId,
+            title: currentTitle(),
           }),
         });
-
         if (res.status === 401) {
-          contentEl.textContent = "登录已失效，请重新登录";
           clearAuth();
-          setTimeout(() => location.reload(), 1200);
+          location.reload();
           return;
         }
-        if (!res.ok) {
-          const err = await res.text();
-          contentEl.textContent = "请求失败: " + err.slice(0, 400);
-          return;
-        }
-
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          resetRequestTimer();
-          buf += decoder.decode(value, { stream: true });
-          const parts = buf.split("\n");
-          buf = parts.pop() || "";
-          for (const line of parts) {
-            const t = line.trim();
-            if (!t.startsWith("data:")) continue;
-            const payload = t.slice(5).trim();
-            if (payload === "[DONE]") continue;
-            try {
-              const obj = JSON.parse(payload);
-              if (obj.status) {
-                const s = obj.status;
-                let label = s.message || "";
-                if (s.type === "thinking") label = "💭 思考中…";
-                else if (s.type === "tool_start")
-                  label = "🔧 调用工具: " + (s.tools || []).join(", ") + " (第 " + s.round + " 轮)";
-                else if (s.type === "tool_running")
-                  label = "⏳ 执行中: " + (s.tools || []).join(", ") + "…";
-                else if (s.type === "tool_done")
-                  label = "✓ 工具完成: " + (s.tools || []).join(", ");
-                else if (!label) label = JSON.stringify(s);
-                if (statusEl) statusEl.textContent = label;
-                else statusEl = appendMsg("status", label, true);
-                if (!gotContent) contentEl.textContent = "…";
-                continue;
-              }
-              const delta = (((obj.choices || [])[0] || {}).delta) || {};
-              if (delta.content) {
-                clearStatus();
-                if (!gotContent) {
-                  full = "";
-                  gotContent = true;
-                }
-                full += delta.content;
-                setAssistantContent(contentEl, full);
-                $("messages").scrollTop = $("messages").scrollHeight;
-              }
-            } catch (_) {}
-          }
-        }
-
-        clearStatus();
-        if (!gotContent) full = contentEl.textContent || "(无内容)";
-        if (full === "思考中…" || full === "…") full = "(无内容)";
-        setAssistantContent(contentEl, full);
-        history.push({ role: "assistant", content: full });
-        await persistConversation();
+        const job = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(job.detail || "后台任务提交失败");
+        currentJobId = job.id;
+        statusEl.textContent = job.status_message || "后台生成中…";
+        pollJob(job.id, contentEl, statusEl, true);
       } catch (e) {
-        clearStatus();
-        if (e.name === "AbortError") {
-          const timeoutText = gotContent
-            ? full + "\n\n[超过 90 秒未收到新数据，连接已停止]"
-            : "超过 90 秒未收到服务器数据，连接已停止，请重试。";
-          setAssistantContent(contentEl, timeoutText);
-        } else {
-          contentEl.textContent = "网络错误: " + e.message;
-        }
-      } finally {
-        clearStatus();
-        clearTimeout(requestTimer);
-        busy = false;
-        $("send-btn").disabled = false;
-        $("model-select").disabled = false;
-        $("input").focus();
+        const row = statusEl.closest(".msg");
+        if (row) row.remove();
+        setAssistantContent(contentEl, "请求失败：" + e.message);
+        setBusyState(false);
       }
     }
 
