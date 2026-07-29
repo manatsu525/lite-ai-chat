@@ -23,6 +23,8 @@ logger = logging.getLogger("lite-ai-chat.tools")
 _SEARCH_TIMEOUT = min(float(HTTP_TIMEOUT), 8.0)
 _CONNECT_TIMEOUT = 3.0
 _SCRAPER_EXT_TIMEOUT = 3.0
+_MAX_SEARCH_SNIPPET_CHARS = 500
+_MAX_SCRAPE_CHARS = 8000
 _UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -32,6 +34,22 @@ _UA = (
 def _timeout(total: float = None) -> httpx.Timeout:
     t = total if total is not None else _SEARCH_TIMEOUT
     return httpx.Timeout(t, connect=_CONNECT_TIMEOUT)
+
+
+def _trim_search_results(results: list, limit: int) -> list:
+    """统一限制搜索卡片长度，避免提供商返回异常长摘要。"""
+    trimmed = []
+    for item in (results or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        value = dict(item)
+        value["title"] = str(value.get("title") or "")[:300]
+        value["url"] = str(value.get("url") or "")[:2000]
+        value["snippet"] = str(value.get("snippet") or "")[
+            :_MAX_SEARCH_SNIPPET_CHARS
+        ]
+        trimmed.append(value)
+    return trimmed
 
 
 # OpenAI function calling 工具定义
@@ -558,6 +576,7 @@ async def web_search(query: str, num_results: int = None) -> str:
                 timeout=_SEARCH_TIMEOUT + 1,
             )
             if weather_results:
+                weather_results = _trim_search_results(weather_results, n)
                 return json.dumps(
                     {
                         "query": query,
@@ -577,6 +596,7 @@ async def web_search(query: str, num_results: int = None) -> str:
             timeout=13.0,
         )
         if searx_results:
+            searx_results = _trim_search_results(searx_results, n)
             return json.dumps(
                 {
                     "query": query,
@@ -635,6 +655,7 @@ async def web_search(query: str, num_results: int = None) -> str:
             },
             ensure_ascii=False,
         )
+    results = _trim_search_results(results, n)
     return json.dumps(
         {"query": query, "results": results, "source": source},
         ensure_ascii=False,
@@ -662,8 +683,8 @@ async def _builtin_scrape(url: str) -> str:
     except Exception:
         text = re.sub(r"<[^>]+>", " ", html)
         text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > 12000:
-        text = text[:12000] + "\n\n...[内容已截断]"
+    if len(text) > _MAX_SCRAPE_CHARS:
+        text = text[:_MAX_SCRAPE_CHARS] + "\n\n...[内容已截断]"
     return json.dumps(
         {"url": url, "title": title, "markdown": text, "source": "builtin"},
         ensure_ascii=False,
@@ -695,15 +716,15 @@ async def scrape_url(url: str) -> str:
                             md = data.get("markdown") or data.get("content") or data.get("data") or ""
                             title = data.get("title") or ""
                         text = str(md)
-                        if len(text) > 12000:
-                            text = text[:12000] + "\n\n...[内容已截断]"
+                        if len(text) > _MAX_SCRAPE_CHARS:
+                            text = text[:_MAX_SCRAPE_CHARS] + "\n\n...[内容已截断]"
                         return json.dumps(
                             {"url": url, "title": title, "markdown": text},
                             ensure_ascii=False,
                         )
                 text = r.text
-                if len(text) > 12000:
-                    text = text[:12000] + "\n\n...[内容已截断]"
+                if len(text) > _MAX_SCRAPE_CHARS:
+                    text = text[:_MAX_SCRAPE_CHARS] + "\n\n...[内容已截断]"
                 return json.dumps({"url": url, "markdown": text}, ensure_ascii=False)
     except Exception:
         pass
