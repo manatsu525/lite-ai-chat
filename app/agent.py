@@ -41,7 +41,14 @@ SYSTEM_PROMPT = f"""你是一个有用的 AI 助手，可以使用工具获取�
 
 def _llm_round_timeout(model: str) -> float:
     config = get_model_config(model)
-    provider_cap = 90.0 if config and config["provider"] == "deepseek" else 30.0
+    provider = config.get("provider") if config else ""
+    if provider == "groq":
+        provider_cap = 60.0
+    elif provider == "deepseek":
+        provider_cap = 150.0
+    else:
+        # 自定义 OpenAI 兼容提供商（如 Agnes）往往首 token 较慢。
+        provider_cap = 180.0
     return max(5.0, min(float(LLM_TIMEOUT), provider_cap))
 
 # 匹配 Groq failed_generation 里的畸形调用，例如：

@@ -219,7 +219,7 @@ DB_PATH = Path(os.getenv("DB_PATH", DATA_DIR / "users.db"))
 
 # HTTP 超时（秒）— 工具侧默认偏短，避免串行卡死
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "8"))
-LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "90"))
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "180"))
 
 # 服务
 HOST = os.getenv("HOST", "0.0.0.0")

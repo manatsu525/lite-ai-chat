@@ -177,7 +177,77 @@
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
+    .msg .content { white-space: normal; }
     .msg .content a { color: var(--accent); }
+    .msg .content p { margin: 0.45rem 0; }
+    .msg .content p:first-child { margin-top: 0; }
+    .msg .content p:last-child { margin-bottom: 0; }
+    .msg .content h1, .msg .content h2, .msg .content h3,
+    .msg .content h4, .msg .content h5, .msg .content h6 {
+      margin: 0.9rem 0 0.45rem;
+      line-height: 1.3;
+    }
+    .msg .content h1 { font-size: 1.4rem; }
+    .msg .content h2 { font-size: 1.25rem; }
+    .msg .content h3 { font-size: 1.1rem; }
+    .msg .content ul, .msg .content ol {
+      margin: 0.45rem 0;
+      padding-left: 1.5rem;
+    }
+    .msg .content li { margin: 0.2rem 0; }
+    .msg .content blockquote {
+      margin: 0.55rem 0;
+      padding: 0.25rem 0.8rem;
+      color: var(--muted);
+      border-left: 3px solid var(--accent);
+      background: rgba(108, 158, 255, 0.06);
+    }
+    .msg .content code {
+      padding: 0.12rem 0.3rem;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--bg);
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.88em;
+    }
+    .msg .content pre {
+      margin: 0.6rem 0;
+      padding: 0.8rem;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #0b0d11;
+    }
+    .msg .content pre code {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      white-space: pre;
+    }
+    .table-wrap {
+      max-width: 100%;
+      margin: 0.65rem 0;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .msg .content table {
+      width: 100%;
+      border-collapse: collapse;
+      white-space: nowrap;
+      font-size: 0.88rem;
+    }
+    .msg .content th, .msg .content td {
+      padding: 0.55rem 0.7rem;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+    .msg .content th { background: rgba(108, 158, 255, 0.12); }
+    .msg .content tr:last-child td { border-bottom: 0; }
+    .msg .content th:last-child, .msg .content td:last-child { border-right: 0; }
+    .msg .content hr { margin: 0.8rem 0; border: 0; border-top: 1px solid var(--border); }
     .msg.status {
       align-self: center;
       background: transparent;
@@ -899,6 +969,165 @@
       if (el) el.remove();
     }
 
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function renderInlineMarkdown(value) {
+      const codeTokens = [];
+      let text = escapeHtml(value).replace(/`([^`\n]+)`/g, (_, code) => {
+        const token = "\u0000CODE" + codeTokens.length + "\u0000";
+        codeTokens.push("<code>" + code + "</code>");
+        return token;
+      });
+      text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
+        const decoded = url.replace(/&amp;/g, "&");
+        if (!/^https?:\/\//i.test(decoded)) return label + " (" + url + ")";
+        return '<a href="' + escapeHtml(decoded) + '" target="_blank" rel="noopener noreferrer">' + label + "</a>";
+      });
+      text = text
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+        .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+        .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+      return text.replace(/\u0000CODE(\d+)\u0000/g, (_, index) => codeTokens[Number(index)] || "");
+    }
+
+    function splitTableRow(line) {
+      let value = line.trim();
+      if (value.startsWith("|")) value = value.slice(1);
+      if (value.endsWith("|")) value = value.slice(0, -1);
+      return value.split("|").map((cell) => cell.trim());
+    }
+
+    function isTableDivider(line) {
+      const cells = splitTableRow(line);
+      return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+    }
+
+    function renderMarkdown(markdown) {
+      const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
+      const out = [];
+      let paragraph = [];
+      let listType = "";
+
+      const flushParagraph = () => {
+        if (!paragraph.length) return;
+        out.push("<p>" + paragraph.map(renderInlineMarkdown).join("<br>") + "</p>");
+        paragraph = [];
+      };
+      const closeList = () => {
+        if (listType) out.push("</" + listType + ">");
+        listType = "";
+      };
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+
+        if (/^```/.test(trimmed)) {
+          flushParagraph();
+          closeList();
+          const language = trimmed.slice(3).trim();
+          const code = [];
+          i++;
+          while (i < lines.length && !/^```/.test(lines[i].trim())) {
+            code.push(lines[i]);
+            i++;
+          }
+          const languageClass = language
+            ? ' class="language-' + escapeHtml(language.replace(/[^a-zA-Z0-9_-]/g, "")) + '"'
+            : "";
+          out.push("<pre><code" + languageClass + ">" + escapeHtml(code.join("\n")) + "</code></pre>");
+          continue;
+        }
+
+        if (
+          line.includes("|") &&
+          i + 1 < lines.length &&
+          isTableDivider(lines[i + 1])
+        ) {
+          flushParagraph();
+          closeList();
+          const headers = splitTableRow(line);
+          i += 2;
+          const rows = [];
+          while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+            rows.push(splitTableRow(lines[i]));
+            i++;
+          }
+          i--;
+          let table = '<div class="table-wrap"><table><thead><tr>';
+          table += headers.map((cell) => "<th>" + renderInlineMarkdown(cell) + "</th>").join("");
+          table += "</tr></thead><tbody>";
+          for (const row of rows) {
+            table += "<tr>" + headers.map((_, index) =>
+              "<td>" + renderInlineMarkdown(row[index] || "") + "</td>"
+            ).join("") + "</tr>";
+          }
+          table += "</tbody></table></div>";
+          out.push(table);
+          continue;
+        }
+
+        if (!trimmed) {
+          flushParagraph();
+          closeList();
+          continue;
+        }
+
+        const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+        if (heading) {
+          flushParagraph();
+          closeList();
+          const level = heading[1].length;
+          out.push("<h" + level + ">" + renderInlineMarkdown(heading[2]) + "</h" + level + ">");
+          continue;
+        }
+        if (/^([-*_])(?:\s*\1){2,}$/.test(trimmed)) {
+          flushParagraph();
+          closeList();
+          out.push("<hr>");
+          continue;
+        }
+        if (trimmed.startsWith("> ")) {
+          flushParagraph();
+          closeList();
+          out.push("<blockquote>" + renderInlineMarkdown(trimmed.slice(2)) + "</blockquote>");
+          continue;
+        }
+
+        const unordered = trimmed.match(/^[-*+]\s+(.+)$/);
+        const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+        if (unordered || ordered) {
+          flushParagraph();
+          const nextType = unordered ? "ul" : "ol";
+          if (listType !== nextType) {
+            closeList();
+            listType = nextType;
+            out.push("<" + listType + ">");
+          }
+          out.push("<li>" + renderInlineMarkdown((unordered || ordered)[1]) + "</li>");
+          continue;
+        }
+
+        closeList();
+        paragraph.push(line);
+      }
+      flushParagraph();
+      closeList();
+      return out.join("");
+    }
+
+    function setAssistantContent(element, content) {
+      element.innerHTML = renderMarkdown(content);
+    }
+
     function appendMsg(role, content, isStatus) {
       removeEmpty();
       const div = document.createElement("div");
@@ -911,7 +1140,8 @@
       }
       const c = document.createElement("div");
       c.className = "content";
-      c.textContent = content;
+      if (!isStatus && role === "assistant") setAssistantContent(c, content);
+      else c.textContent = content;
       div.appendChild(c);
       $("messages").appendChild(div);
       $("messages").scrollTop = $("messages").scrollHeight;
@@ -952,8 +1182,13 @@
       let gotContent = false;
       const controller = new AbortController();
       const selectedModel = $("model-select").value || "";
-      const requestTimeout = selectedModel.startsWith("deepseek::") ? 180000 : 120000;
-      const requestTimer = setTimeout(() => controller.abort(), requestTimeout);
+      let requestTimer = null;
+      const resetRequestTimer = () => {
+        clearTimeout(requestTimer);
+        // 只限制“完全没有任何数据”的时间；后端心跳会持续续期。
+        requestTimer = setTimeout(() => controller.abort(), 90000);
+      };
+      resetRequestTimer();
       const clearStatus = () => {
         if (statusEl) {
           const row = statusEl.closest(".msg");
@@ -992,6 +1227,7 @@
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          resetRequestTimer();
           buf += decoder.decode(value, { stream: true });
           const parts = buf.split("\n");
           buf = parts.pop() || "";
@@ -1026,7 +1262,7 @@
                   gotContent = true;
                 }
                 full += delta.content;
-                contentEl.textContent = full;
+                setAssistantContent(contentEl, full);
                 $("messages").scrollTop = $("messages").scrollHeight;
               }
             } catch (_) {}
@@ -1036,15 +1272,16 @@
         clearStatus();
         if (!gotContent) full = contentEl.textContent || "(无内容)";
         if (full === "思考中…" || full === "…") full = "(无内容)";
-        contentEl.textContent = full;
+        setAssistantContent(contentEl, full);
         history.push({ role: "assistant", content: full });
         await persistConversation();
       } catch (e) {
         clearStatus();
         if (e.name === "AbortError") {
-          contentEl.textContent = gotContent
-            ? full + "\n\n[请求超时，连接已停止]"
-            : "请求等待过久，已自动停止，请重试。";
+          const timeoutText = gotContent
+            ? full + "\n\n[超过 90 秒未收到新数据，连接已停止]"
+            : "超过 90 秒未收到服务器数据，连接已停止，请重试。";
+          setAssistantContent(contentEl, timeoutText);
         } else {
           contentEl.textContent = "网络错误: " + e.message;
         }
