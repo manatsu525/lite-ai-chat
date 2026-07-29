@@ -364,6 +364,10 @@
           <label for="provider-base">OpenAI 兼容 API 地址</label>
           <input id="provider-base" placeholder="https://api.example.com/v1" />
         </div>
+        <div class="field wide">
+          <label for="manual-models">手动模型名（可选）</label>
+          <textarea id="manual-models" rows="3" placeholder="每行一个或用逗号分隔，例如：provider/new-model"></textarea>
+        </div>
       </div>
       <div class="settings-actions">
         <button id="provider-test" type="button">测试 API 并读取模型</button>
@@ -381,7 +385,7 @@
         </div>
       </div>
       <p class="settings-note">
-        API Key 只写入服务器的受限配置文件，页面不会读取或回显完整密钥。保存前会再次验证 API 和模型列表。
+        API Key 只写入服务器的受限配置文件，页面不会读取或回显完整密钥。手填模型会通过最小聊天请求直接验证，不要求出现在 /models 中。
       </p>
     </div>
   </div>
@@ -624,12 +628,16 @@
     };
 
     function providerPayload() {
+      const manualModels = $("manual-models").value
+        .split(/[\n,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
       return {
         provider_id: $("provider-id").value.trim(),
         provider_label: $("provider-label").value.trim(),
         api_base: $("provider-base").value.trim(),
         api_key: $("provider-key").value.trim(),
-        selected_models: [],
+        selected_models: Array.from(new Set(manualModels)),
       };
     }
 
@@ -668,6 +676,7 @@
         $("provider-label").value = item.provider_label || item.provider_id;
         $("provider-base").value = item.api_base || "";
         $("provider-key").value = "";
+        $("manual-models").value = "";
         $("provider-key").placeholder = item.configured
           ? "已保存 " + (item.api_key_masked || "密钥") + "；留空保持不变"
           : "输入 API Key";
@@ -684,6 +693,7 @@
         $("provider-label").value = "Custom";
         $("provider-base").value = "";
         $("provider-key").value = "";
+        $("manual-models").value = "";
         $("provider-key").placeholder = "输入 API Key";
         savedProviderModels = [];
         renderProviderModels([], []);
@@ -721,6 +731,7 @@
     $("settings-btn").onclick = openSettings;
     $("settings-close").onclick = () => {
       $("provider-key").value = "";
+      $("manual-models").value = "";
       $("settings-modal").classList.remove("open");
     };
     $("settings-modal").addEventListener("click", (e) => {
@@ -743,9 +754,19 @@
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || "API 测试失败");
-        const selected = savedProviderModels.filter((m) => data.models.includes(m));
+        const selected = Array.from(new Set([
+          ...savedProviderModels.filter((m) => data.models.includes(m)),
+          ...body.selected_models,
+        ]));
         renderProviderModels(data.models || [], selected.length ? selected : data.models.slice(0, 1));
-        setProviderStatus("连接成功，读取到 " + data.models.length + " 个模型。请选择后保存。", "ok");
+        const manualText = (data.manual_tested || []).length
+          ? "，手填模型验证 " + data.manual_tested.length + " 个"
+          : "";
+        const warning = data.models_warning ? "（/models 不可用，已使用手填模型验证）" : "";
+        setProviderStatus(
+          "连接成功，得到 " + data.models.length + " 个模型" + manualText + warning + "。请选择后保存。",
+          "ok"
+        );
       } catch (e) {
         testedModels = [];
         renderProviderModels([], []);

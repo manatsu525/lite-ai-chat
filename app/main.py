@@ -74,7 +74,7 @@ class ProviderBody(BaseModel):
     provider_label: str = Field(min_length=1, max_length=80)
     api_base: str = Field(min_length=8, max_length=500)
     api_key: str = Field(default="", max_length=1000)
-    selected_models: List[str] = Field(default_factory=list)
+    selected_models: List[str] = Field(default_factory=list, max_length=500)
 
 
 class ConversationBody(BaseModel):
@@ -133,6 +133,51 @@ async def _fetch_provider_models(api_base: str, api_key: str):
     if not models:
         raise HTTPException(status_code=400, detail="API 测试成功，但未读取到模型列表")
     return sorted(models)[:500]
+
+
+def _clean_model_ids(values: List[str]):
+    models = list(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))
+    if any(len(item) > 300 for item in models):
+        raise HTTPException(status_code=400, detail="模型名称过长")
+    return models
+
+
+async def _test_provider_model(api_base: str, api_key: str, model_id: str):
+    """对未出现在 /models 的手填模型发起最小聊天请求验证。"""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(45.0, connect=5.0),
+            follow_redirects=True,
+        ) as client:
+            response = await client.post(
+                f"{api_base}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "Reply OK"}],
+                    "max_tokens": 1,
+                    "stream": False,
+                },
+            )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"手填模型 {model_id} 连接失败：{type(exc).__name__}",
+        )
+    if response.status_code >= 400:
+        try:
+            payload = response.json()
+            message = (payload.get("error") or {}).get("message") or payload.get("detail")
+        except Exception:
+            message = ""
+        raise HTTPException(
+            status_code=400,
+            detail=f"手填模型 {model_id} 测试失败（HTTP {response.status_code}）"
+            + (f"：{str(message)[:300]}" if message else ""),
+        )
 
 
 # ---------- 认证 ----------
@@ -207,20 +252,43 @@ def provider_settings(user: dict = Depends(require_user)):
 @app.post("/api/settings/providers/test")
 async def test_provider(body: ProviderBody, user: dict = Depends(require_user)):
     api_base, api_key = _provider_credentials(body)
-    models = await _fetch_provider_models(api_base, api_key)
-    return {"ok": True, "models": models}
+    manual_models = _clean_model_ids(body.selected_models)
+    models_warning = ""
+    try:
+        models = await _fetch_provider_models(api_base, api_key)
+    except HTTPException as exc:
+        if not manual_models:
+            raise
+        models = []
+        models_warning = str(exc.detail)
+    if len(manual_models) > 20:
+        raise HTTPException(status_code=400, detail="一次最多测试 20 个手填模型")
+    for model_id in manual_models:
+        await _test_provider_model(api_base, api_key, model_id)
+    combined = list(dict.fromkeys([*models, *manual_models]))
+    return {
+        "ok": True,
+        "models": combined,
+        "manual_tested": manual_models,
+        "models_warning": models_warning,
+    }
 
 
 @app.post("/api/settings/providers")
 async def save_provider(body: ProviderBody, user: dict = Depends(require_user)):
     api_base, api_key = _provider_credentials(body)
-    available_models = await _fetch_provider_models(api_base, api_key)
-    selected = list(dict.fromkeys(x.strip() for x in body.selected_models if x.strip()))
-    invalid = [model for model in selected if model not in available_models]
-    if invalid:
-        raise HTTPException(status_code=400, detail=f"模型已不可用：{invalid[0]}")
+    selected = _clean_model_ids(body.selected_models)
     if not selected:
         raise HTTPException(status_code=400, detail="请至少选择一个模型")
+    try:
+        available_models = await _fetch_provider_models(api_base, api_key)
+    except HTTPException:
+        available_models = []
+    manual_models = [model for model in selected if model not in available_models]
+    if len(manual_models) > 20:
+        raise HTTPException(status_code=400, detail="一次最多验证 20 个手填模型")
+    for model_id in manual_models:
+        await _test_provider_model(api_base, api_key, model_id)
     save_provider_config(
         {
             "provider_id": body.provider_id,
