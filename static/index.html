@@ -50,6 +50,11 @@
       border: 1px solid var(--border);
     }
     button.ghost:hover { color: var(--text); border-color: var(--muted); }
+    button.danger {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    }
     input, textarea, select {
       width: 100%;
       background: var(--bg);
@@ -122,11 +127,23 @@
       padding: 0.5rem 2rem 0.5rem 0.7rem;
       color: var(--text);
     }
+    .session-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      padding: 0.45rem 1rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    #conversation-select { flex: 1; min-width: 0; }
+    .session-bar button { flex-shrink: 0; }
     @media (max-width: 680px) {
       header { align-items: flex-start; gap: 0.6rem; }
       header .user-meta { flex-wrap: wrap; justify-content: flex-end; }
       #who { display: none; }
       #model-select { min-width: 170px; max-width: 205px; }
+      .session-bar { padding: 0.45rem 0.65rem; }
+      .session-bar button { padding: 0.5rem 0.65rem; }
     }
     #messages {
       flex: 1;
@@ -303,6 +320,11 @@
         <button class="ghost" id="logout-btn" type="button">退出</button>
       </div>
     </header>
+    <div class="session-bar">
+      <select id="conversation-select" aria-label="最近对话"></select>
+      <button class="ghost" id="new-chat-btn" type="button">新对话</button>
+      <button class="danger" id="delete-chat-btn" type="button">删除</button>
+    </div>
     <div id="messages">
       <div class="empty" id="empty-hint">发送消息开始对话<br />支持网络搜索与网页抓取</div>
     </div>
@@ -355,6 +377,7 @@
         <div class="model-list" id="provider-models"></div>
         <div class="settings-actions">
           <button id="provider-save" type="button">保存所选模型</button>
+          <button class="danger" id="provider-delete" type="button">删除此 API 配置</button>
         </div>
       </div>
       <p class="settings-note">
@@ -373,6 +396,8 @@
     let providerSettings = [];
     let testedModels = [];
     let savedProviderModels = [];
+    let conversations = [];
+    let currentConversationId = "";
 
     const $ = (id) => document.getElementById(id);
 
@@ -427,6 +452,7 @@
       $("chat-view").style.display = "flex";
       $("who").textContent = username || localStorage.getItem(USER_KEY) || "";
       loadModels();
+      loadConversations();
     }
 
     async function loadModels() {
@@ -461,6 +487,141 @@
     $("model-select").addEventListener("change", (e) => {
       localStorage.setItem(MODEL_KEY, e.target.value);
     });
+
+    function newConversationId() {
+      if (crypto.randomUUID) return crypto.randomUUID();
+      return "chat-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+    }
+
+    function currentTitle() {
+      const first = history.find((item) => item.role === "user" && item.content.trim());
+      return first ? first.content.trim().replace(/\s+/g, " ").slice(0, 32) : "新对话";
+    }
+
+    function renderConversationSelect() {
+      const select = $("conversation-select");
+      select.innerHTML = "";
+      for (const item of conversations.slice(0, 10)) {
+        const option = document.createElement("option");
+        option.value = item.id;
+        option.textContent = item.title || "新对话";
+        select.appendChild(option);
+      }
+      select.value = currentConversationId;
+    }
+
+    function renderConversation() {
+      $("messages").innerHTML = "";
+      if (!history.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.id = "empty-hint";
+        empty.innerHTML = "发送消息开始对话<br />支持网络搜索与网页抓取";
+        $("messages").appendChild(empty);
+        return;
+      }
+      for (const item of history) appendMsg(item.role, item.content);
+    }
+
+    function createConversation() {
+      currentConversationId = newConversationId();
+      history = [];
+      conversations.unshift({
+        id: currentConversationId,
+        title: "新对话",
+        messages: [],
+        updated_at: new Date().toISOString(),
+      });
+      conversations = conversations.slice(0, 10);
+      renderConversationSelect();
+      renderConversation();
+    }
+
+    async function loadConversations() {
+      try {
+        const res = await api("/api/conversations");
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "对话历史加载失败");
+        conversations = data.data || [];
+        if (conversations.length) {
+          currentConversationId = conversations[0].id;
+          history = (conversations[0].messages || []).map((item) => ({
+            role: item.role,
+            content: item.content || "",
+          }));
+          renderConversationSelect();
+          renderConversation();
+        } else {
+          createConversation();
+        }
+      } catch (_) {
+        createConversation();
+      }
+    }
+
+    async function persistConversation() {
+      if (!currentConversationId || !history.length) return;
+      const title = currentTitle();
+      let item = conversations.find((entry) => entry.id === currentConversationId);
+      if (!item) {
+        item = { id: currentConversationId };
+        conversations.unshift(item);
+      }
+      item.title = title;
+      item.messages = history.map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
+      item.updated_at = new Date().toISOString();
+      conversations = [item, ...conversations.filter((entry) => entry.id !== item.id)].slice(0, 10);
+      renderConversationSelect();
+      try {
+        await api("/api/conversations/" + encodeURIComponent(currentConversationId), {
+          method: "PUT",
+          body: JSON.stringify({ title, messages: item.messages }),
+        });
+      } catch (_) {}
+    }
+
+    $("conversation-select").addEventListener("change", (e) => {
+      if (busy) {
+        e.target.value = currentConversationId;
+        return;
+      }
+      const item = conversations.find((entry) => entry.id === e.target.value);
+      if (!item) return;
+      currentConversationId = item.id;
+      history = (item.messages || []).map((message) => ({
+        role: message.role,
+        content: message.content || "",
+      }));
+      renderConversation();
+    });
+
+    $("new-chat-btn").onclick = () => {
+      if (!busy) createConversation();
+    };
+
+    $("delete-chat-btn").onclick = async () => {
+      if (busy || !currentConversationId) return;
+      if (!confirm("删除当前对话？")) return;
+      const deleting = currentConversationId;
+      conversations = conversations.filter((item) => item.id !== deleting);
+      try {
+        await api("/api/conversations/" + encodeURIComponent(deleting), { method: "DELETE" });
+      } catch (_) {}
+      if (conversations.length) {
+        currentConversationId = conversations[0].id;
+        history = (conversations[0].messages || []).map((item) => ({
+          role: item.role,
+          content: item.content || "",
+        }));
+        renderConversationSelect();
+        renderConversation();
+      } else {
+        createConversation();
+      }
+    };
 
     function providerPayload() {
       return {
@@ -511,8 +672,13 @@
           ? "已保存 " + (item.api_key_masked || "密钥") + "；留空保持不变"
           : "输入 API Key";
         savedProviderModels = (item.models || []).slice();
-        renderProviderModels([], []);
-        setProviderStatus(item.configured ? "已读取服务器配置，请测试 API 获取最新模型。" : "");
+        renderProviderModels(savedProviderModels, savedProviderModels);
+        $("provider-delete").disabled = !item.configured;
+        setProviderStatus(
+          item.configured
+            ? "可取消勾选模型后保存，或删除整个 API 配置；测试可刷新模型列表。"
+            : ""
+        );
       } else {
         $("provider-id").value = "custom";
         $("provider-label").value = "Custom";
@@ -521,6 +687,7 @@
         $("provider-key").placeholder = "输入 API Key";
         savedProviderModels = [];
         renderProviderModels([], []);
+        $("provider-delete").disabled = true;
         setProviderStatus("");
       }
     }
@@ -628,6 +795,29 @@
       }
     };
 
+    $("provider-delete").onclick = async () => {
+      const providerId = $("provider-id").value.trim();
+      if (!providerId || $("provider-delete").disabled) return;
+      if (!confirm("删除此 API 配置及其全部已选模型？")) return;
+      $("provider-delete").disabled = true;
+      setProviderStatus("正在删除…");
+      try {
+        const res = await api(
+          "/api/settings/providers/" + encodeURIComponent(providerId),
+          { method: "DELETE" }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "删除失败");
+        localStorage.removeItem(MODEL_KEY);
+        await loadModels();
+        setProviderStatus("已删除 API 配置和相关模型。", "ok");
+        await openSettings();
+      } catch (e) {
+        setProviderStatus(e.message, "bad");
+        $("provider-delete").disabled = false;
+      }
+    };
+
     $("auth-btn").onclick = async () => {
       const username = $("username").value.trim();
       const password = $("password").value;
@@ -666,14 +856,21 @@
       location.reload();
     };
 
-    $("clear-btn").onclick = () => {
+    $("clear-btn").onclick = async () => {
       history = [];
-      $("messages").innerHTML = "";
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.id = "empty-hint";
-      empty.innerHTML = "发送消息开始对话<br />支持网络搜索与网页抓取";
-      $("messages").appendChild(empty);
+      renderConversation();
+      const item = conversations.find((entry) => entry.id === currentConversationId);
+      if (item) {
+        item.messages = [];
+        item.title = "新对话";
+        renderConversationSelect();
+        try {
+          await api("/api/conversations/" + encodeURIComponent(currentConversationId), {
+            method: "PUT",
+            body: JSON.stringify({ title: "新对话", messages: [] }),
+          });
+        } catch (_) {}
+      }
     };
 
     function removeEmpty() {
@@ -723,10 +920,10 @@
 
       history.push({ role: "user", content: text });
       appendMsg("user", text);
-
       busy = true;
       $("send-btn").disabled = true;
       $("model-select").disabled = true;
+      await persistConversation();
 
       const contentEl = appendMsg("assistant", "思考中…");
       let full = "";
@@ -736,6 +933,13 @@
       const selectedModel = $("model-select").value || "";
       const requestTimeout = selectedModel.startsWith("deepseek::") ? 180000 : 120000;
       const requestTimer = setTimeout(() => controller.abort(), requestTimeout);
+      const clearStatus = () => {
+        if (statusEl) {
+          const row = statusEl.closest(".msg");
+          if (row) row.remove();
+          statusEl = null;
+        }
+      };
 
       try {
         const res = await api("/v1/chat/completions", {
@@ -795,6 +999,7 @@
               }
               const delta = (((obj.choices || [])[0] || {}).delta) || {};
               if (delta.content) {
+                clearStatus();
                 if (!gotContent) {
                   full = "";
                   gotContent = true;
@@ -807,11 +1012,14 @@
           }
         }
 
+        clearStatus();
         if (!gotContent) full = contentEl.textContent || "(无内容)";
         if (full === "思考中…" || full === "…") full = "(无内容)";
         contentEl.textContent = full;
         history.push({ role: "assistant", content: full });
+        await persistConversation();
       } catch (e) {
+        clearStatus();
         if (e.name === "AbortError") {
           contentEl.textContent = gotContent
             ? full + "\n\n[请求超时，连接已停止]"
@@ -820,6 +1028,7 @@
           contentEl.textContent = "网络错误: " + e.message;
         }
       } finally {
+        clearStatus();
         clearTimeout(requestTimer);
         busy = false;
         $("send-btn").disabled = false;

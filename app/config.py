@@ -52,6 +52,8 @@ def _configured_providers():
     }
     try:
         payload = json.loads(PROVIDERS_FILE.read_text())
+        for provider_id in payload.get("disabled_providers") or []:
+            providers.pop(str(provider_id), None)
         for item in payload.get("providers") or []:
             provider_id = str(item.get("provider_id") or "").strip()
             if provider_id and item.get("api_key"):
@@ -99,16 +101,51 @@ def save_provider_config(provider: dict):
         try:
             payload = json.loads(PROVIDERS_FILE.read_text())
         except (FileNotFoundError, json.JSONDecodeError, OSError):
-            payload = {"providers": []}
+            payload = {"providers": [], "disabled_providers": []}
         providers = [
             item
             for item in payload.get("providers") or []
             if item.get("provider_id") != provider["provider_id"]
         ]
         providers.append(provider)
+        disabled = [
+            item
+            for item in payload.get("disabled_providers") or []
+            if item != provider["provider_id"]
+        ]
         tmp = PROVIDERS_FILE.with_suffix(".json.tmp")
         tmp.write_text(
-            json.dumps({"providers": providers}, ensure_ascii=False, indent=2)
+            json.dumps(
+                {"providers": providers, "disabled_providers": disabled},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        os.chmod(str(tmp), 0o600)
+        tmp.replace(PROVIDERS_FILE)
+
+
+def delete_provider_config(provider_id: str):
+    with _providers_lock:
+        try:
+            payload = json.loads(PROVIDERS_FILE.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            payload = {"providers": [], "disabled_providers": []}
+        providers = [
+            item
+            for item in payload.get("providers") or []
+            if item.get("provider_id") != provider_id
+        ]
+        disabled = list(dict.fromkeys(
+            [*(payload.get("disabled_providers") or []), provider_id]
+        ))
+        tmp = PROVIDERS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(
+                {"providers": providers, "disabled_providers": disabled},
+                ensure_ascii=False,
+                indent=2,
+            )
         )
         os.chmod(str(tmp), 0o600)
         tmp.replace(PROVIDERS_FILE)

@@ -5,6 +5,7 @@
 - 静态前端
 """
 from pathlib import Path
+import re
 from typing import Any, List, Optional
 from urllib.parse import urlparse
 
@@ -23,6 +24,7 @@ from .config import (
     JWT_EXPIRE_DAYS,
     PORT,
     default_model_id,
+    delete_provider_config,
     get_model_config,
     get_provider_secret,
     provider_settings_public,
@@ -73,6 +75,11 @@ class ProviderBody(BaseModel):
     api_base: str = Field(min_length=8, max_length=500)
     api_key: str = Field(default="", max_length=1000)
     selected_models: List[str] = Field(default_factory=list)
+
+
+class ConversationBody(BaseModel):
+    title: str = Field(default="新对话", max_length=100)
+    messages: List[ChatMessage] = Field(default_factory=list, max_length=100)
 
 
 def _provider_credentials(body: ProviderBody):
@@ -225,6 +232,54 @@ async def save_provider(body: ProviderBody, user: dict = Depends(require_user)):
         }
     )
     return {"ok": True, "models": public_model_options()}
+
+
+@app.delete("/api/settings/providers/{provider_id}")
+def delete_provider(provider_id: str, user: dict = Depends(require_user)):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,40}", provider_id):
+        raise HTTPException(status_code=400, detail="无效的提供商标识")
+    delete_provider_config(provider_id)
+    return {"ok": True, "models": public_model_options()}
+
+
+# ---------- 最近 10 个对话 ----------
+@app.get("/api/conversations")
+def conversations(user: dict = Depends(require_user)):
+    return {"data": users.list_conversations(user["id"], limit=10)}
+
+
+@app.put("/api/conversations/{conversation_id}")
+def save_conversation(
+    conversation_id: str,
+    body: ConversationBody,
+    user: dict = Depends(require_user),
+):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{8,64}", conversation_id):
+        raise HTTPException(status_code=400, detail="无效的对话标识")
+    messages = []
+    total_chars = 0
+    for message in body.messages[-100:]:
+        if message.role not in ("user", "assistant"):
+            continue
+        content = message.content or ""
+        total_chars += len(content)
+        if total_chars > 1_000_000:
+            raise HTTPException(status_code=413, detail="对话内容过大")
+        messages.append({"role": message.role, "content": content})
+    title = body.title.strip()[:100] or "新对话"
+    users.save_conversation(user["id"], conversation_id, title, messages)
+    return {"ok": True}
+
+
+@app.delete("/api/conversations/{conversation_id}")
+def delete_conversation(
+    conversation_id: str,
+    user: dict = Depends(require_user),
+):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{8,64}", conversation_id):
+        raise HTTPException(status_code=400, detail="无效的对话标识")
+    users.delete_conversation(user["id"], conversation_id)
+    return {"ok": True}
 
 
 # ---------- OpenAI 兼容接口 ----------
