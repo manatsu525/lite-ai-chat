@@ -1842,7 +1842,6 @@
           currentJobId = "";
           clearJobPoll();
           setBusyState(false);
-          $("input").focus();
         } catch (_) {
           // 页面离线或锁屏时不影响服务器任务；恢复联网后继续查询。
           if (currentJobId === jobId) jobPollTimer = setTimeout(poll, 1800);
