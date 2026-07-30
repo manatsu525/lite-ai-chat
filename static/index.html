@@ -148,6 +148,7 @@
     #messages {
       flex: 1;
       overflow-y: auto;
+      overflow-anchor: none;
       padding: 1rem;
       display: flex;
       flex-direction: column;
@@ -190,6 +191,34 @@
     .msg .content h1 { font-size: 1.4rem; }
     .msg .content h2 { font-size: 1.25rem; }
     .msg .content h3 { font-size: 1.1rem; }
+    .message-actions {
+      display: flex;
+      gap: 0.4rem;
+      margin-top: 0.55rem;
+      padding-top: 0.4rem;
+      border-top: 1px solid rgba(154, 160, 166, 0.16);
+    }
+    .message-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.25rem 0.45rem;
+      color: var(--muted);
+      background: transparent;
+      border: 0;
+      border-radius: 5px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    .message-action:hover {
+      color: var(--text);
+      background: rgba(154, 160, 166, 0.1);
+    }
+    .message-action svg {
+      width: 14px;
+      height: 14px;
+      pointer-events: none;
+    }
     .msg .content ul, .msg .content ol {
       margin: 0.45rem 0;
       padding-left: 1.5rem;
@@ -627,7 +656,12 @@
         $("messages").appendChild(empty);
         return;
       }
-      for (const item of history) appendMsg(item.role, item.content);
+      history.forEach((item, index) => {
+        appendMsg(item.role, item.content, false, {
+          messageIndex: index,
+          showActions: true,
+        });
+      });
     }
 
     function createConversation() {
@@ -1176,33 +1210,91 @@
     };
 
     $("messages").addEventListener("click", (event) => {
-      const button = event.target.closest(".code-download");
-      if (!button) return;
-      const block = button.closest(".code-block");
-      const code = block && block.querySelector("code");
-      if (!code) return;
-      const language = (block.dataset.language || "").toLowerCase();
-      const extension = CODE_EXTENSIONS[language] || "txt";
-      const filename = extension === "Dockerfile"
-        ? "Dockerfile"
-        : "code-" + Date.now() + "." + extension;
-      const blob = new Blob([code.textContent], { type: "text/plain;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const action = event.target.closest(".message-action");
+      if (action) {
+        const index = Number(action.dataset.messageIndex);
+        if (!Number.isInteger(index) || !history[index]) return;
+        if (action.dataset.action === "copy") {
+          copyMessage(history[index].content || "", action);
+        } else if (action.dataset.action === "retry") {
+          retryMessage(index);
+        }
+        return;
+      }
+
+      const downloadButton = event.target.closest(".code-download");
+      if (downloadButton) {
+        const block = downloadButton.closest(".code-block");
+        const code = block && block.querySelector("code");
+        if (!code) return;
+        const language = (block.dataset.language || "").toLowerCase();
+        const extension = CODE_EXTENSIONS[language] || "txt";
+        const filename = extension === "Dockerfile"
+          ? "Dockerfile"
+          : "code-" + Date.now() + "." + extension;
+        const blob = new Blob([code.textContent], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
     });
+
+    async function copyMessage(text, button) {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const input = document.createElement("textarea");
+          input.value = text;
+          input.style.position = "fixed";
+          input.style.opacity = "0";
+          document.body.appendChild(input);
+          input.select();
+          document.execCommand("copy");
+          input.remove();
+        }
+        const oldLabel = button.querySelector("span").textContent;
+        button.querySelector("span").textContent = "已复制";
+        setTimeout(() => {
+          const label = button.querySelector("span");
+          if (label) label.textContent = oldLabel;
+        }, 1200);
+      } catch (_) {}
+    }
 
     function setAssistantContent(element, content) {
       element.innerHTML = renderMarkdown(content);
     }
 
-    function appendMsg(role, content, isStatus) {
+    function addMessageActions(container, messageIndex) {
+      if (!container || container.querySelector(".message-actions")) return;
+      const actions = document.createElement("div");
+      actions.className = "message-actions";
+      actions.innerHTML =
+        '<button class="message-action" type="button" data-action="copy" data-message-index="' +
+        messageIndex + '" title="复制这条消息">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">' +
+        '<rect x="9" y="9" width="11" height="11" rx="2"></rect>' +
+        '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>' +
+        '<span>复制</span></button>' +
+        '<button class="message-action" type="button" data-action="retry" data-message-index="' +
+        messageIndex + '" title="从这条用户消息重新生成回答">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">' +
+        '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path><path d="M3 3v5h5"></path></svg>' +
+        '<span>重新回答</span></button>';
+      container.appendChild(actions);
+    }
+
+    function appendMsg(role, content, isStatus, options = {}) {
       removeEmpty();
+      const messagesEl = $("messages");
+      const wasNearBottom =
+        messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
       const div = document.createElement("div");
       div.className = "msg " + (isStatus ? "status" : role);
       if (!isStatus) {
@@ -1216,8 +1308,17 @@
       if (!isStatus && role === "assistant") setAssistantContent(c, content);
       else c.textContent = content;
       div.appendChild(c);
-      $("messages").appendChild(div);
-      $("messages").scrollTop = $("messages").scrollHeight;
+      if (
+        !isStatus &&
+        options.showActions !== false &&
+        Number.isInteger(options.messageIndex)
+      ) {
+        addMessageActions(div, options.messageIndex);
+      }
+      messagesEl.appendChild(div);
+      if (options.followIfNearBottom && wasNearBottom) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
       return c;
     }
 
@@ -1313,12 +1414,39 @@
             jobPollTimer = setTimeout(poll, 900);
             return;
           }
+          const finalContent = job.content || "(无内容)";
+          setAssistantContent(contentEl, finalContent);
+          const last = history[history.length - 1];
+          if (!last || last.role !== "assistant") {
+            history.push({ role: "assistant", content: finalContent });
+          } else {
+            last.content = finalContent;
+          }
+          addMessageActions(
+            contentEl.closest(".msg"),
+            history.length - 1,
+          );
+          const conversation = conversations.find(
+            (entry) => entry.id === currentConversationId,
+          );
+          if (conversation) {
+            conversation.title = currentTitle();
+            conversation.messages = history.map((message) => ({
+              role: message.role,
+              content: message.content,
+            }));
+            conversation.updated_at = new Date().toISOString();
+            conversations = [
+              conversation,
+              ...conversations.filter((entry) => entry.id !== conversation.id),
+            ].slice(0, 10);
+            renderConversationSelect();
+          }
           const statusRow = statusEl.closest(".msg");
           if (statusRow) statusRow.remove();
           currentJobId = "";
           clearJobPoll();
           setBusyState(false);
-          await loadConversations();
           $("input").focus();
         } catch (_) {
           // 页面离线或锁屏时不影响服务器任务；恢复联网后继续查询。
@@ -1341,19 +1469,16 @@
       }
     }
 
-    async function send() {
-      if (busy) return;
-      const text = $("input").value.trim();
-      if (!text) return;
-      $("input").value = "";
-      autoResize();
-
-      history.push({ role: "user", content: text });
-      appendMsg("user", text);
+    async function startAssistantGeneration() {
       setBusyState(true);
       await persistConversation();
 
-      const contentEl = appendMsg("assistant", "思考中…");
+      const contentEl = appendMsg(
+        "assistant",
+        "思考中…",
+        false,
+        { showActions: false },
+      );
       const statusEl = appendMsg("status", "正在提交后台任务…", true);
       try {
         const res = await api("/api/chat/jobs", {
@@ -1381,6 +1506,45 @@
         setAssistantContent(contentEl, "请求失败：" + e.message);
         setBusyState(false);
       }
+    }
+
+    async function retryMessage(messageIndex) {
+      if (busy || !history[messageIndex]) return;
+      let userIndex = messageIndex;
+      if (history[messageIndex].role !== "user") {
+        userIndex = -1;
+        for (let index = messageIndex - 1; index >= 0; index--) {
+          if (history[index].role === "user") {
+            userIndex = index;
+            break;
+          }
+        }
+      }
+      if (userIndex < 0) return;
+      const previousScrollTop = $("messages").scrollTop;
+      history = history.slice(0, userIndex + 1);
+      renderConversation();
+      $("messages").scrollTop = Math.min(
+        previousScrollTop,
+        Math.max(0, $("messages").scrollHeight - $("messages").clientHeight),
+      );
+      await startAssistantGeneration();
+    }
+
+    async function send() {
+      if (busy) return;
+      const text = $("input").value.trim();
+      if (!text) return;
+      $("input").value = "";
+      autoResize();
+
+      history.push({ role: "user", content: text });
+      appendMsg("user", text, false, {
+        messageIndex: history.length - 1,
+        showActions: true,
+        followIfNearBottom: true,
+      });
+      await startAssistantGeneration();
     }
 
     init();
