@@ -192,3 +192,10 @@ async def stop_job(user_id: int, job_id: str) -> Optional[dict]:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
     return users.get_chat_job(user_id, job_id)
+
+
+async def stop_active_job_for_user(user_id: int) -> None:
+    """管理员删除账号前停止该账号正在运行的上游请求。"""
+    active = users.get_active_chat_job(user_id)
+    if active:
+        await stop_job(user_id, active["id"])

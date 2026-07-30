@@ -7,6 +7,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import JWT_ALGORITHM, JWT_EXPIRE_DAYS, JWT_SECRET
+from . import users
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -57,4 +58,23 @@ async def require_user(
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要登录")
     payload = decode_token(token)
-    return {"id": int(payload["sub"]), "username": payload.get("username", "")}
+    user = users.get_user_by_id(int(payload["sub"]))
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="账号不存在或已被删除",
+        )
+    return {
+        "id": int(user["id"]),
+        "username": user["username"],
+        "is_admin": bool(user["is_admin"]),
+    }
+
+
+async def require_admin(user: dict = Depends(require_user)) -> dict:
+    if not user.get("is_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅管理员可执行此操作",
+        )
+    return user

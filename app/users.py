@@ -26,8 +26,25 @@ def init_db() -> None:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT DEFAULT (datetime('now'))
                 )
+                """
+            )
+            columns = {
+                row["name"] for row in c.execute("PRAGMA table_info(users)").fetchall()
+            }
+            if "is_admin" not in columns:
+                c.execute(
+                    "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+                )
+            # 兼容旧安装：若还没有管理员，将最早创建的账号提升为管理员。
+            c.execute(
+                """
+                UPDATE users
+                SET is_admin = 1
+                WHERE id = (SELECT MIN(id) FROM users)
+                  AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin = 1)
                 """
             )
             c.execute(
@@ -88,30 +105,89 @@ def user_count() -> int:
 def get_user(username: str) -> Optional[dict]:
     with _conn() as c:
         row = c.execute(
-            "SELECT id, username, password_hash FROM users WHERE username = ?",
+            """
+            SELECT id, username, password_hash, is_admin, created_at
+            FROM users
+            WHERE username = ?
+            """,
             (username,),
         ).fetchone()
         return dict(row) if row else None
 
 
-def create_user(username: str, password: str) -> dict:
+def get_user_by_id(user_id: int) -> Optional[dict]:
+    with _conn() as c:
+        row = c.execute(
+            """
+            SELECT id, username, password_hash, is_admin, created_at
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_users() -> list:
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT id, username, is_admin, created_at
+            FROM users
+            ORDER BY id ASC
+            """
+        ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "username": row["username"],
+            "is_admin": bool(row["is_admin"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def create_user(
+    username: str,
+    password: str,
+    *,
+    is_admin: bool = False,
+    max_users: Optional[int] = None,
+) -> dict:
     """创建用户，密码 bcrypt 加盐哈希。"""
     username = username.strip()
     if not username or len(username) < 2:
         raise ValueError("用户名至少 2 个字符")
+    if len(username) > 40:
+        raise ValueError("用户名最多 40 个字符")
     if not password or len(password) < 4:
         raise ValueError("密码至少 4 个字符")
+    if len(password.encode("utf-8")) > 72:
+        raise ValueError("密码 UTF-8 编码后不能超过 72 字节")
 
     pw_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=10)).decode("utf-8")
     with _lock:
         with _conn() as c:
+            count = int(c.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+            if max_users is not None and count >= max_users:
+                raise ValueError(f"账号数量已达上限（{max_users} 个）")
+            if is_admin and count > 0:
+                raise ValueError("管理员账号已存在")
             try:
                 cur = c.execute(
-                    "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-                    (username, pw_hash),
+                    """
+                    INSERT INTO users (username, password_hash, is_admin)
+                    VALUES (?, ?, ?)
+                    """,
+                    (username, pw_hash, 1 if is_admin else 0),
                 )
                 c.commit()
-                return {"id": cur.lastrowid, "username": username}
+                return {
+                    "id": cur.lastrowid,
+                    "username": username,
+                    "is_admin": bool(is_admin),
+                }
             except sqlite3.IntegrityError:
                 raise ValueError("用户名已存在")
 
@@ -123,7 +199,29 @@ def verify_password(username: str, password: str) -> Optional[dict]:
     ok = bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8"))
     if not ok:
         return None
-    return {"id": user["id"], "username": user["username"]}
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "is_admin": bool(user["is_admin"]),
+    }
+
+
+def delete_managed_user(user_id: int) -> None:
+    """删除普通账号及其全部隔离数据；管理员账号不可删除。"""
+    with _lock:
+        with _conn() as c:
+            row = c.execute(
+                "SELECT is_admin FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("账号不存在")
+            if row["is_admin"]:
+                raise ValueError("不能删除管理员账号")
+            c.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
+            c.execute("DELETE FROM chat_jobs WHERE user_id = ?", (user_id,))
+            c.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            c.commit()
 
 
 def list_conversations(user_id: int, limit: int = 10) -> list:
