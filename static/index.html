@@ -50,6 +50,11 @@
       border: 1px solid var(--border);
     }
     button.ghost:hover { color: var(--text); border-color: var(--muted); }
+    button.danger {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    }
     input, textarea, select {
       width: 100%;
       background: var(--bg);
@@ -122,15 +127,28 @@
       padding: 0.5rem 2rem 0.5rem 0.7rem;
       color: var(--text);
     }
+    .session-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      padding: 0.45rem 1rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    #conversation-select { flex: 1; min-width: 0; }
+    .session-bar button { flex-shrink: 0; }
     @media (max-width: 680px) {
       header { align-items: flex-start; gap: 0.6rem; }
       header .user-meta { flex-wrap: wrap; justify-content: flex-end; }
       #who { display: none; }
       #model-select { min-width: 170px; max-width: 205px; }
+      .session-bar { padding: 0.45rem 0.65rem; }
+      .session-bar button { padding: 0.5rem 0.65rem; }
     }
     #messages {
       flex: 1;
       overflow-y: auto;
+      overflow-anchor: none;
       padding: 1rem;
       display: flex;
       flex-direction: column;
@@ -160,7 +178,135 @@
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
+    .msg .content { white-space: normal; }
     .msg .content a { color: var(--accent); }
+    .msg .content p { margin: 0.45rem 0; }
+    .msg .content p:first-child { margin-top: 0; }
+    .msg .content p:last-child { margin-bottom: 0; }
+    .msg .content h1, .msg .content h2, .msg .content h3,
+    .msg .content h4, .msg .content h5, .msg .content h6 {
+      margin: 0.9rem 0 0.45rem;
+      line-height: 1.3;
+    }
+    .msg .content h1 { font-size: 1.4rem; }
+    .msg .content h2 { font-size: 1.25rem; }
+    .msg .content h3 { font-size: 1.1rem; }
+    .message-actions {
+      display: flex;
+      gap: 0.4rem;
+      margin-top: 0.55rem;
+      padding-top: 0.4rem;
+      border-top: 1px solid rgba(154, 160, 166, 0.16);
+    }
+    .message-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.25rem 0.45rem;
+      color: var(--muted);
+      background: transparent;
+      border: 0;
+      border-radius: 5px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    .message-action:hover {
+      color: var(--text);
+      background: rgba(154, 160, 166, 0.1);
+    }
+    .message-action svg {
+      width: 14px;
+      height: 14px;
+      pointer-events: none;
+    }
+    .msg .content ul, .msg .content ol {
+      margin: 0.45rem 0;
+      padding-left: 1.5rem;
+    }
+    .msg .content li { margin: 0.2rem 0; }
+    .msg .content blockquote {
+      margin: 0.55rem 0;
+      padding: 0.25rem 0.8rem;
+      color: var(--muted);
+      border-left: 3px solid var(--accent);
+      background: rgba(108, 158, 255, 0.06);
+    }
+    .msg .content code {
+      padding: 0.12rem 0.3rem;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--bg);
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.88em;
+    }
+    .msg .content pre {
+      margin: 0;
+      padding: 2.7rem 0.8rem 0.8rem;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #0b0d11;
+    }
+    .msg .content pre code {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      white-space: pre;
+    }
+    .code-block {
+      position: relative;
+      margin: 0.6rem 0;
+    }
+    .code-download {
+      position: absolute;
+      top: 0.45rem;
+      right: 0.45rem;
+      z-index: 1;
+      display: inline-flex;
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      background: rgba(23, 26, 33, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .code-download:hover {
+      color: var(--text);
+      background: var(--panel);
+      border-color: var(--muted);
+    }
+    .code-download svg {
+      width: 16px;
+      height: 16px;
+      pointer-events: none;
+    }
+    .table-wrap {
+      max-width: 100%;
+      margin: 0.65rem 0;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .msg .content table {
+      width: 100%;
+      border-collapse: collapse;
+      white-space: nowrap;
+      font-size: 0.88rem;
+    }
+    .msg .content th, .msg .content td {
+      padding: 0.55rem 0.7rem;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+    .msg .content th { background: rgba(108, 158, 255, 0.12); }
+    .msg .content tr:last-child td { border-bottom: 0; }
+    .msg .content th:last-child, .msg .content td:last-child { border-right: 0; }
+    .msg .content hr { margin: 0.8rem 0; border: 0; border-top: 1px solid var(--border); }
     .msg.status {
       align-self: center;
       background: transparent;
@@ -200,6 +346,76 @@
       text-align: center;
       line-height: 1.7;
     }
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      padding: 1rem;
+      background: rgba(0, 0, 0, 0.72);
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
+    .settings-card {
+      width: min(640px, 100%);
+      max-height: calc(100vh - 2rem);
+      overflow-y: auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.1rem;
+    }
+    .settings-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+    .settings-head h2 { font-size: 1.1rem; }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    .settings-grid .wide { grid-column: 1 / -1; }
+    .settings-actions {
+      display: flex;
+      gap: 0.6rem;
+      margin-top: 0.9rem;
+      flex-wrap: wrap;
+    }
+    .settings-note, .settings-status {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-top: 0.55rem;
+      line-height: 1.5;
+    }
+    .settings-status.ok { color: var(--ok); }
+    .settings-status.bad { color: var(--danger); }
+    .model-list {
+      margin-top: 0.55rem;
+      max-height: 230px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.35rem;
+    }
+    .model-option {
+      display: flex;
+      gap: 0.55rem;
+      align-items: flex-start;
+      padding: 0.45rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      word-break: break-all;
+    }
+    .model-option:hover { background: var(--bg); }
+    .model-option input { width: auto; margin-top: 0.18rem; }
+    @media (max-width: 600px) {
+      .settings-grid { grid-template-columns: 1fr; }
+      .settings-grid .wide { grid-column: auto; }
+    }
   </style>
 </head>
 <body>
@@ -228,19 +444,79 @@
       <div class="user-meta">
         <select id="model-select" aria-label="选择模型" title="选择模型"></select>
         <span id="who"></span>
+        <button class="ghost" id="settings-btn" type="button">API / 模型</button>
         <button class="ghost" id="clear-btn" type="button">清空</button>
         <button class="ghost" id="logout-btn" type="button">退出</button>
       </div>
     </header>
+    <div class="session-bar">
+      <select id="conversation-select" aria-label="最近对话"></select>
+      <button class="ghost" id="new-chat-btn" type="button">新对话</button>
+      <button class="danger" id="delete-chat-btn" type="button">删除</button>
+    </div>
     <div id="messages">
       <div class="empty" id="empty-hint">发送消息开始对话<br />支持网络搜索与网页抓取</div>
     </div>
     <div class="composer">
       <div class="composer-inner">
         <textarea id="input" rows="1" placeholder="输入消息… (Enter 发送，Shift+Enter 换行)"></textarea>
+        <button class="danger" id="stop-btn" type="button" style="display:none">停止</button>
         <button id="send-btn" type="button">发送</button>
       </div>
-      <div class="hint">登录 Token 保存在本地，默认 60 天有效 · 后端自动多轮工具调用</div>
+      <div class="hint">生成在服务器后台继续，刷新、锁屏或关闭页面后可回来查看 · 后端自动多轮工具调用</div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="settings-modal" role="dialog" aria-modal="true">
+    <div class="settings-card">
+      <div class="settings-head">
+        <h2>API 与模型设置</h2>
+        <button class="ghost" id="settings-close" type="button">关闭</button>
+      </div>
+      <div class="settings-grid">
+        <div class="field">
+          <label for="provider-select">提供商配置</label>
+          <select id="provider-select"></select>
+        </div>
+        <div class="field">
+          <label for="provider-id">配置标识</label>
+          <input id="provider-id" placeholder="例如 groq" />
+        </div>
+        <div class="field">
+          <label for="provider-label">显示名称</label>
+          <input id="provider-label" placeholder="例如 Groq" />
+        </div>
+        <div class="field">
+          <label for="provider-key">API Key</label>
+          <input id="provider-key" type="password" autocomplete="off" placeholder="留空则使用已保存密钥" />
+        </div>
+        <div class="field wide">
+          <label for="provider-base">OpenAI 兼容 API 地址</label>
+          <input id="provider-base" placeholder="https://api.example.com/v1" />
+        </div>
+        <div class="field wide">
+          <label for="manual-models">手动模型名（可选）</label>
+          <textarea id="manual-models" rows="3" placeholder="每行一个或用逗号分隔，例如：provider/new-model"></textarea>
+        </div>
+      </div>
+      <div class="settings-actions">
+        <button id="provider-test" type="button">测试 API 并读取模型</button>
+      </div>
+      <div class="settings-status" id="provider-status"></div>
+      <div id="models-panel" style="display:none">
+        <div class="field" style="margin-top:0.9rem">
+          <label for="model-filter">筛选模型</label>
+          <input id="model-filter" placeholder="输入模型名称…" />
+        </div>
+        <div class="model-list" id="provider-models"></div>
+        <div class="settings-actions">
+          <button id="provider-save" type="button">保存所选模型</button>
+          <button class="danger" id="provider-delete" type="button">删除此 API 配置</button>
+        </div>
+      </div>
+      <p class="settings-note">
+        API Key 只写入服务器的受限配置文件，页面不会读取或回显完整密钥。手填模型会通过最小聊天请求直接验证，不要求出现在 /models 中。
+      </p>
     </div>
   </div>
 
@@ -251,6 +527,13 @@
     let history = []; // {role, content}
     let busy = false;
     let isBootstrap = false;
+    let providerSettings = [];
+    let testedModels = [];
+    let savedProviderModels = [];
+    let conversations = [];
+    let currentConversationId = "";
+    let currentJobId = "";
+    let jobPollTimer = null;
 
     const $ = (id) => document.getElementById(id);
 
@@ -300,11 +583,12 @@
       $("chat-view").style.display = "none";
     }
 
-    function showChat(username) {
+    async function showChat(username) {
       $("login-view").style.display = "none";
       $("chat-view").style.display = "flex";
       $("who").textContent = username || localStorage.getItem(USER_KEY) || "";
-      loadModels();
+      await Promise.all([loadModels(), loadConversations()]);
+      await resumeActiveJob();
     }
 
     async function loadModels() {
@@ -326,6 +610,9 @@
         const selected = models.some((m) => m.id === saved) ? saved : payload.default;
         select.value = selected || (models[0] && models[0].id) || "";
         if (select.value) localStorage.setItem(MODEL_KEY, select.value);
+        if (!models.length) {
+          select.innerHTML = '<option value="">请先配置 API</option>';
+        }
       } catch (e) {
         select.innerHTML = '<option value="">模型不可用</option>';
       } finally {
@@ -336,6 +623,358 @@
     $("model-select").addEventListener("change", (e) => {
       localStorage.setItem(MODEL_KEY, e.target.value);
     });
+
+    function newConversationId() {
+      if (crypto.randomUUID) return crypto.randomUUID();
+      return "chat-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+    }
+
+    function currentTitle() {
+      const first = history.find((item) => item.role === "user" && item.content.trim());
+      return first ? first.content.trim().replace(/\s+/g, " ").slice(0, 32) : "新对话";
+    }
+
+    function renderConversationSelect() {
+      const select = $("conversation-select");
+      select.innerHTML = "";
+      for (const item of conversations.slice(0, 10)) {
+        const option = document.createElement("option");
+        option.value = item.id;
+        option.textContent = item.title || "新对话";
+        select.appendChild(option);
+      }
+      select.value = currentConversationId;
+    }
+
+    function renderConversation() {
+      $("messages").innerHTML = "";
+      if (!history.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.id = "empty-hint";
+        empty.innerHTML = "发送消息开始对话<br />支持网络搜索与网页抓取";
+        $("messages").appendChild(empty);
+        return;
+      }
+      history.forEach((item, index) => {
+        appendMsg(item.role, item.content, false, {
+          messageIndex: index,
+          showActions: true,
+        });
+      });
+    }
+
+    function createConversation() {
+      currentConversationId = newConversationId();
+      history = [];
+      conversations.unshift({
+        id: currentConversationId,
+        title: "新对话",
+        messages: [],
+        updated_at: new Date().toISOString(),
+      });
+      conversations = conversations.slice(0, 10);
+      renderConversationSelect();
+      renderConversation();
+    }
+
+    async function loadConversations() {
+      try {
+        const res = await api("/api/conversations");
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "对话历史加载失败");
+        conversations = data.data || [];
+        if (conversations.length) {
+          currentConversationId = conversations[0].id;
+          history = (conversations[0].messages || []).map((item) => ({
+            role: item.role,
+            content: item.content || "",
+          }));
+          renderConversationSelect();
+          renderConversation();
+        } else {
+          createConversation();
+        }
+      } catch (_) {
+        createConversation();
+      }
+    }
+
+    async function persistConversation() {
+      if (!currentConversationId || !history.length) return;
+      const title = currentTitle();
+      let item = conversations.find((entry) => entry.id === currentConversationId);
+      if (!item) {
+        item = { id: currentConversationId };
+        conversations.unshift(item);
+      }
+      item.title = title;
+      item.messages = history.map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
+      item.updated_at = new Date().toISOString();
+      conversations = [item, ...conversations.filter((entry) => entry.id !== item.id)].slice(0, 10);
+      renderConversationSelect();
+      try {
+        await api("/api/conversations/" + encodeURIComponent(currentConversationId), {
+          method: "PUT",
+          body: JSON.stringify({ title, messages: item.messages }),
+        });
+      } catch (_) {}
+    }
+
+    $("conversation-select").addEventListener("change", (e) => {
+      if (busy) {
+        e.target.value = currentConversationId;
+        return;
+      }
+      const item = conversations.find((entry) => entry.id === e.target.value);
+      if (!item) return;
+      currentConversationId = item.id;
+      history = (item.messages || []).map((message) => ({
+        role: message.role,
+        content: message.content || "",
+      }));
+      renderConversation();
+    });
+
+    $("new-chat-btn").onclick = () => {
+      if (!busy) createConversation();
+    };
+
+    $("delete-chat-btn").onclick = async () => {
+      if (busy || !currentConversationId) return;
+      if (!confirm("删除当前对话？")) return;
+      const deleting = currentConversationId;
+      conversations = conversations.filter((item) => item.id !== deleting);
+      try {
+        await api("/api/conversations/" + encodeURIComponent(deleting), { method: "DELETE" });
+      } catch (_) {}
+      if (conversations.length) {
+        currentConversationId = conversations[0].id;
+        history = (conversations[0].messages || []).map((item) => ({
+          role: item.role,
+          content: item.content || "",
+        }));
+        renderConversationSelect();
+        renderConversation();
+      } else {
+        createConversation();
+      }
+    };
+
+    function providerPayload() {
+      const manualModels = $("manual-models").value
+        .split(/[\n,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      return {
+        provider_id: $("provider-id").value.trim(),
+        provider_label: $("provider-label").value.trim(),
+        api_base: $("provider-base").value.trim(),
+        api_key: $("provider-key").value.trim(),
+        selected_models: Array.from(new Set(manualModels)),
+      };
+    }
+
+    function setProviderStatus(message, kind = "") {
+      const el = $("provider-status");
+      el.textContent = message;
+      el.className = "settings-status " + kind;
+    }
+
+    function renderProviderModels(models, selected = []) {
+      testedModels = models.slice();
+      const selectedSet = new Set(selected);
+      const list = $("provider-models");
+      list.innerHTML = "";
+      for (const model of models) {
+        const label = document.createElement("label");
+        label.className = "model-option";
+        label.dataset.model = model.toLowerCase();
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = model;
+        checkbox.checked = selectedSet.has(model);
+        const text = document.createElement("span");
+        text.textContent = model;
+        label.append(checkbox, text);
+        list.appendChild(label);
+      }
+      $("models-panel").style.display = models.length ? "block" : "none";
+      $("model-filter").value = "";
+    }
+
+    function applyProvider(providerId) {
+      const item = providerSettings.find((p) => p.provider_id === providerId);
+      if (item) {
+        $("provider-id").value = item.provider_id;
+        $("provider-label").value = item.provider_label || item.provider_id;
+        $("provider-base").value = item.api_base || "";
+        $("provider-key").value = "";
+        $("manual-models").value = "";
+        $("provider-key").placeholder = item.configured
+          ? "已保存 " + (item.api_key_masked || "密钥") + "；留空保持不变"
+          : "输入 API Key";
+        savedProviderModels = (item.models || []).slice();
+        renderProviderModels(savedProviderModels, savedProviderModels);
+        $("provider-delete").disabled = !item.configured;
+        setProviderStatus(
+          item.configured
+            ? "可取消勾选模型后保存，或删除整个 API 配置；测试可刷新模型列表。"
+            : ""
+        );
+      } else {
+        $("provider-id").value = "custom";
+        $("provider-label").value = "Custom";
+        $("provider-base").value = "";
+        $("provider-key").value = "";
+        $("manual-models").value = "";
+        $("provider-key").placeholder = "输入 API Key";
+        savedProviderModels = [];
+        renderProviderModels([], []);
+        $("provider-delete").disabled = true;
+        setProviderStatus("");
+      }
+    }
+
+    async function openSettings() {
+      $("settings-modal").classList.add("open");
+      setProviderStatus("正在读取配置…");
+      try {
+        const res = await api("/api/settings/providers");
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "读取配置失败");
+        providerSettings = data.providers || [];
+        const select = $("provider-select");
+        select.innerHTML = "";
+        for (const item of providerSettings) {
+          const option = document.createElement("option");
+          option.value = item.provider_id;
+          option.textContent = item.provider_label || item.provider_id;
+          select.appendChild(option);
+        }
+        const custom = document.createElement("option");
+        custom.value = "__custom__";
+        custom.textContent = "其他 OpenAI 兼容接口";
+        select.appendChild(custom);
+        applyProvider((providerSettings[0] || {}).provider_id || "__custom__");
+      } catch (e) {
+        setProviderStatus(e.message, "bad");
+      }
+    }
+
+    $("settings-btn").onclick = openSettings;
+    $("settings-close").onclick = () => {
+      $("provider-key").value = "";
+      $("manual-models").value = "";
+      $("settings-modal").classList.remove("open");
+    };
+    $("settings-modal").addEventListener("click", (e) => {
+      if (e.target === $("settings-modal")) $("settings-close").click();
+    });
+    $("provider-select").addEventListener("change", (e) => applyProvider(e.target.value));
+
+    $("provider-test").onclick = async () => {
+      const body = providerPayload();
+      if (!body.provider_id || !body.provider_label || !body.api_base) {
+        setProviderStatus("请完整填写配置标识、显示名称和 API 地址。", "bad");
+        return;
+      }
+      $("provider-test").disabled = true;
+      setProviderStatus("正在测试 API 并读取模型…");
+      try {
+        const res = await api("/api/settings/providers/test", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "API 测试失败");
+        const selected = Array.from(new Set([
+          ...savedProviderModels.filter((m) => data.models.includes(m)),
+          ...body.selected_models,
+        ]));
+        renderProviderModels(data.models || [], selected.length ? selected : data.models.slice(0, 1));
+        const manualText = (data.manual_tested || []).length
+          ? "，手填模型验证 " + data.manual_tested.length + " 个"
+          : "";
+        const warning = data.models_warning ? "（/models 不可用，已使用手填模型验证）" : "";
+        setProviderStatus(
+          "连接成功，得到 " + data.models.length + " 个模型" + manualText + warning + "。请选择后保存。",
+          "ok"
+        );
+      } catch (e) {
+        testedModels = [];
+        renderProviderModels([], []);
+        setProviderStatus(e.message, "bad");
+      } finally {
+        $("provider-test").disabled = false;
+      }
+    };
+
+    $("model-filter").addEventListener("input", (e) => {
+      const value = e.target.value.trim().toLowerCase();
+      for (const item of $("provider-models").children) {
+        item.style.display = !value || item.dataset.model.includes(value) ? "flex" : "none";
+      }
+    });
+
+    $("provider-save").onclick = async () => {
+      if (!testedModels.length) {
+        setProviderStatus("请先测试 API 并读取模型。", "bad");
+        return;
+      }
+      const body = providerPayload();
+      body.selected_models = Array.from(
+        $("provider-models").querySelectorAll('input[type="checkbox"]:checked')
+      ).map((el) => el.value);
+      if (!body.selected_models.length) {
+        setProviderStatus("请至少选择一个模型。", "bad");
+        return;
+      }
+      $("provider-save").disabled = true;
+      setProviderStatus("正在验证并保存…");
+      try {
+        const res = await api("/api/settings/providers", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "保存失败");
+        $("provider-key").value = "";
+        setProviderStatus("保存成功，聊天模型列表已更新。", "ok");
+        await loadModels();
+        setTimeout(() => $("settings-close").click(), 700);
+      } catch (e) {
+        setProviderStatus(e.message, "bad");
+      } finally {
+        $("provider-save").disabled = false;
+      }
+    };
+
+    $("provider-delete").onclick = async () => {
+      const providerId = $("provider-id").value.trim();
+      if (!providerId || $("provider-delete").disabled) return;
+      if (!confirm("删除此 API 配置及其全部已选模型？")) return;
+      $("provider-delete").disabled = true;
+      setProviderStatus("正在删除…");
+      try {
+        const res = await api(
+          "/api/settings/providers/" + encodeURIComponent(providerId),
+          { method: "DELETE" }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "删除失败");
+        localStorage.removeItem(MODEL_KEY);
+        await loadModels();
+        setProviderStatus("已删除 API 配置和相关模型。", "ok");
+        await openSettings();
+      } catch (e) {
+        setProviderStatus(e.message, "bad");
+        $("provider-delete").disabled = false;
+      }
+    };
 
     $("auth-btn").onclick = async () => {
       const username = $("username").value.trim();
@@ -375,14 +1014,21 @@
       location.reload();
     };
 
-    $("clear-btn").onclick = () => {
+    $("clear-btn").onclick = async () => {
       history = [];
-      $("messages").innerHTML = "";
-      const empty = document.createElement("div");
-      empty.className = "empty";
-      empty.id = "empty-hint";
-      empty.innerHTML = "发送消息开始对话<br />支持网络搜索与网页抓取";
-      $("messages").appendChild(empty);
+      renderConversation();
+      const item = conversations.find((entry) => entry.id === currentConversationId);
+      if (item) {
+        item.messages = [];
+        item.title = "新对话";
+        renderConversationSelect();
+        try {
+          await api("/api/conversations/" + encodeURIComponent(currentConversationId), {
+            method: "PUT",
+            body: JSON.stringify({ title: "新对话", messages: [] }),
+          });
+        } catch (_) {}
+      }
     };
 
     function removeEmpty() {
@@ -390,8 +1036,265 @@
       if (el) el.remove();
     }
 
-    function appendMsg(role, content, isStatus) {
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function renderInlineMarkdown(value) {
+      const codeTokens = [];
+      let text = escapeHtml(value).replace(/`([^`\n]+)`/g, (_, code) => {
+        const token = "\u0000CODE" + codeTokens.length + "\u0000";
+        codeTokens.push("<code>" + code + "</code>");
+        return token;
+      });
+      text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
+        const decoded = url.replace(/&amp;/g, "&");
+        if (!/^https?:\/\//i.test(decoded)) return label + " (" + url + ")";
+        return '<a href="' + escapeHtml(decoded) + '" target="_blank" rel="noopener noreferrer">' + label + "</a>";
+      });
+      text = text
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+        .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+        .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+      return text.replace(/\u0000CODE(\d+)\u0000/g, (_, index) => codeTokens[Number(index)] || "");
+    }
+
+    function splitTableRow(line) {
+      let value = line.trim();
+      if (value.startsWith("|")) value = value.slice(1);
+      if (value.endsWith("|")) value = value.slice(0, -1);
+      return value.split("|").map((cell) => cell.trim());
+    }
+
+    function isTableDivider(line) {
+      const cells = splitTableRow(line);
+      return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+    }
+
+    function renderMarkdown(markdown) {
+      const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
+      const out = [];
+      let paragraph = [];
+      let listType = "";
+
+      const flushParagraph = () => {
+        if (!paragraph.length) return;
+        out.push("<p>" + paragraph.map(renderInlineMarkdown).join("<br>") + "</p>");
+        paragraph = [];
+      };
+      const closeList = () => {
+        if (listType) out.push("</" + listType + ">");
+        listType = "";
+      };
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+
+        if (/^```/.test(trimmed)) {
+          flushParagraph();
+          closeList();
+          const language = trimmed.slice(3).trim().split(/\s+/)[0] || "";
+          const code = [];
+          i++;
+          while (i < lines.length && !/^```/.test(lines[i].trim())) {
+            code.push(lines[i]);
+            i++;
+          }
+          const languageClass = language
+            ? ' class="language-' + escapeHtml(language.replace(/[^a-zA-Z0-9_-]/g, "")) + '"'
+            : "";
+          const safeLanguage = language.toLowerCase().replace(/[^a-z0-9_+#.-]/g, "");
+          out.push(
+            '<div class="code-block" data-language="' + escapeHtml(safeLanguage) + '">' +
+            '<button class="code-download" type="button" title="下载代码" aria-label="下载代码">' +
+            '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2">' +
+            '<path d="M12 3v12m0 0 5-5m-5 5-5-5M5 21h14"></path></svg></button>' +
+            "<pre><code" + languageClass + ">" + escapeHtml(code.join("\n")) + "</code></pre></div>"
+          );
+          continue;
+        }
+
+        if (
+          line.includes("|") &&
+          i + 1 < lines.length &&
+          isTableDivider(lines[i + 1])
+        ) {
+          flushParagraph();
+          closeList();
+          const headers = splitTableRow(line);
+          i += 2;
+          const rows = [];
+          while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+            rows.push(splitTableRow(lines[i]));
+            i++;
+          }
+          i--;
+          let table = '<div class="table-wrap"><table><thead><tr>';
+          table += headers.map((cell) => "<th>" + renderInlineMarkdown(cell) + "</th>").join("");
+          table += "</tr></thead><tbody>";
+          for (const row of rows) {
+            table += "<tr>" + headers.map((_, index) =>
+              "<td>" + renderInlineMarkdown(row[index] || "") + "</td>"
+            ).join("") + "</tr>";
+          }
+          table += "</tbody></table></div>";
+          out.push(table);
+          continue;
+        }
+
+        if (!trimmed) {
+          flushParagraph();
+          closeList();
+          continue;
+        }
+
+        const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+        if (heading) {
+          flushParagraph();
+          closeList();
+          const level = heading[1].length;
+          out.push("<h" + level + ">" + renderInlineMarkdown(heading[2]) + "</h" + level + ">");
+          continue;
+        }
+        if (/^([-*_])(?:\s*\1){2,}$/.test(trimmed)) {
+          flushParagraph();
+          closeList();
+          out.push("<hr>");
+          continue;
+        }
+        if (trimmed.startsWith("> ")) {
+          flushParagraph();
+          closeList();
+          out.push("<blockquote>" + renderInlineMarkdown(trimmed.slice(2)) + "</blockquote>");
+          continue;
+        }
+
+        const unordered = trimmed.match(/^[-*+]\s+(.+)$/);
+        const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+        if (unordered || ordered) {
+          flushParagraph();
+          const nextType = unordered ? "ul" : "ol";
+          if (listType !== nextType) {
+            closeList();
+            listType = nextType;
+            out.push("<" + listType + ">");
+          }
+          out.push("<li>" + renderInlineMarkdown((unordered || ordered)[1]) + "</li>");
+          continue;
+        }
+
+        closeList();
+        paragraph.push(line);
+      }
+      flushParagraph();
+      closeList();
+      return out.join("");
+    }
+
+    const CODE_EXTENSIONS = {
+      python: "py", py: "py", javascript: "js", js: "js",
+      typescript: "ts", ts: "ts", jsx: "jsx", tsx: "tsx",
+      bash: "sh", shell: "sh", sh: "sh", zsh: "sh",
+      html: "html", css: "css", json: "json", yaml: "yml", yml: "yml",
+      xml: "xml", sql: "sql", java: "java", kotlin: "kt", c: "c",
+      cpp: "cpp", "c++": "cpp", csharp: "cs", "c#": "cs",
+      go: "go", rust: "rs", ruby: "rb", php: "php", swift: "swift",
+      markdown: "md", md: "md", dockerfile: "Dockerfile",
+    };
+
+    $("messages").addEventListener("click", (event) => {
+      const action = event.target.closest(".message-action");
+      if (action) {
+        const index = Number(action.dataset.messageIndex);
+        if (!Number.isInteger(index) || !history[index]) return;
+        if (action.dataset.action === "copy") {
+          copyMessage(history[index].content || "", action);
+        } else if (action.dataset.action === "retry") {
+          retryMessage(index);
+        }
+        return;
+      }
+
+      const downloadButton = event.target.closest(".code-download");
+      if (downloadButton) {
+        const block = downloadButton.closest(".code-block");
+        const code = block && block.querySelector("code");
+        if (!code) return;
+        const language = (block.dataset.language || "").toLowerCase();
+        const extension = CODE_EXTENSIONS[language] || "txt";
+        const filename = extension === "Dockerfile"
+          ? "Dockerfile"
+          : "code-" + Date.now() + "." + extension;
+        const blob = new Blob([code.textContent], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    });
+
+    async function copyMessage(text, button) {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const input = document.createElement("textarea");
+          input.value = text;
+          input.style.position = "fixed";
+          input.style.opacity = "0";
+          document.body.appendChild(input);
+          input.select();
+          document.execCommand("copy");
+          input.remove();
+        }
+        const oldLabel = button.querySelector("span").textContent;
+        button.querySelector("span").textContent = "已复制";
+        setTimeout(() => {
+          const label = button.querySelector("span");
+          if (label) label.textContent = oldLabel;
+        }, 1200);
+      } catch (_) {}
+    }
+
+    function setAssistantContent(element, content) {
+      element.innerHTML = renderMarkdown(content);
+    }
+
+    function addMessageActions(container, messageIndex) {
+      if (!container || container.querySelector(".message-actions")) return;
+      const actions = document.createElement("div");
+      actions.className = "message-actions";
+      actions.innerHTML =
+        '<button class="message-action" type="button" data-action="copy" data-message-index="' +
+        messageIndex + '" title="复制这条消息">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">' +
+        '<rect x="9" y="9" width="11" height="11" rx="2"></rect>' +
+        '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>' +
+        '<span>复制</span></button>' +
+        '<button class="message-action" type="button" data-action="retry" data-message-index="' +
+        messageIndex + '" title="从这条用户消息重新生成回答">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">' +
+        '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path><path d="M3 3v5h5"></path></svg>' +
+        '<span>重新回答</span></button>';
+      container.appendChild(actions);
+    }
+
+    function appendMsg(role, content, isStatus, options = {}) {
       removeEmpty();
+      const messagesEl = $("messages");
+      const wasNearBottom =
+        messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
       const div = document.createElement("div");
       div.className = "msg " + (isStatus ? "status" : role);
       if (!isStatus) {
@@ -402,10 +1305,20 @@
       }
       const c = document.createElement("div");
       c.className = "content";
-      c.textContent = content;
+      if (!isStatus && role === "assistant") setAssistantContent(c, content);
+      else c.textContent = content;
       div.appendChild(c);
-      $("messages").appendChild(div);
-      $("messages").scrollTop = $("messages").scrollHeight;
+      if (
+        !isStatus &&
+        options.showActions !== false &&
+        Number.isInteger(options.messageIndex)
+      ) {
+        addMessageActions(div, options.messageIndex);
+      }
+      messagesEl.appendChild(div);
+      if (options.followIfNearBottom && wasNearBottom) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
       return c;
     }
 
@@ -422,6 +1335,201 @@
       }
     });
     $("send-btn").onclick = send;
+    $("stop-btn").onclick = stopGeneration;
+
+    function setBusyState(value) {
+      busy = value;
+      $("send-btn").disabled = value;
+      $("model-select").disabled = value;
+      $("conversation-select").disabled = value;
+      $("new-chat-btn").disabled = value;
+      $("delete-chat-btn").disabled = value;
+      $("clear-btn").disabled = value;
+      $("settings-btn").disabled = value;
+      $("stop-btn").style.display = value ? "" : "none";
+      $("stop-btn").disabled = false;
+    }
+
+    function clearJobPoll() {
+      if (jobPollTimer) clearTimeout(jobPollTimer);
+      jobPollTimer = null;
+    }
+
+    function showJobInConversation(job) {
+      const item = conversations.find((entry) => entry.id === job.conversation_id);
+      if (item) {
+        currentConversationId = item.id;
+        history = (item.messages || []).map((message) => ({
+          role: message.role,
+          content: message.content || "",
+        }));
+        renderConversationSelect();
+        renderConversation();
+      }
+      const contentEl = appendMsg("assistant", job.content || "思考中…");
+      const statusEl = appendMsg(
+        "status",
+        job.status_message || "后台生成中…",
+        true,
+      );
+      return { contentEl, statusEl };
+    }
+
+    async function resumeActiveJob() {
+      try {
+        const res = await api("/api/chat/jobs/active");
+        if (!res.ok) return;
+        const payload = await res.json();
+        if (!payload.job) {
+          // 避免任务恰好在首次加载历史后完成而漏掉最后一条回答。
+          await loadConversations();
+          return;
+        }
+        currentJobId = payload.job.id;
+        setBusyState(true);
+        const ui = showJobInConversation(payload.job);
+        pollJob(payload.job.id, ui.contentEl, ui.statusEl, true);
+      } catch (_) {}
+    }
+
+    async function pollJob(jobId, contentEl, statusEl, immediate = false) {
+      clearJobPoll();
+      const poll = async () => {
+        if (currentJobId !== jobId) return;
+        try {
+          const res = await api("/api/chat/jobs/" + encodeURIComponent(jobId));
+          if (res.status === 401) {
+            clearAuth();
+            location.reload();
+            return;
+          }
+          if (!res.ok) throw new Error("任务状态读取失败");
+          const job = await res.json();
+          setAssistantContent(contentEl, job.content || "思考中…");
+          const active = ["queued", "running", "stopping"].includes(job.status);
+          if (active) {
+            statusEl.textContent = job.status_message || (
+              job.status === "stopping" ? "正在停止…" : "后台生成中…"
+            );
+            jobPollTimer = setTimeout(poll, 900);
+            return;
+          }
+          const finalContent = job.content || "(无内容)";
+          setAssistantContent(contentEl, finalContent);
+          const last = history[history.length - 1];
+          if (!last || last.role !== "assistant") {
+            history.push({ role: "assistant", content: finalContent });
+          } else {
+            last.content = finalContent;
+          }
+          addMessageActions(
+            contentEl.closest(".msg"),
+            history.length - 1,
+          );
+          const conversation = conversations.find(
+            (entry) => entry.id === currentConversationId,
+          );
+          if (conversation) {
+            conversation.title = currentTitle();
+            conversation.messages = history.map((message) => ({
+              role: message.role,
+              content: message.content,
+            }));
+            conversation.updated_at = new Date().toISOString();
+            conversations = [
+              conversation,
+              ...conversations.filter((entry) => entry.id !== conversation.id),
+            ].slice(0, 10);
+            renderConversationSelect();
+          }
+          const statusRow = statusEl.closest(".msg");
+          if (statusRow) statusRow.remove();
+          currentJobId = "";
+          clearJobPoll();
+          setBusyState(false);
+          $("input").focus();
+        } catch (_) {
+          // 页面离线或锁屏时不影响服务器任务；恢复联网后继续查询。
+          if (currentJobId === jobId) jobPollTimer = setTimeout(poll, 1800);
+        }
+      };
+      jobPollTimer = setTimeout(poll, immediate ? 0 : 700);
+    }
+
+    async function stopGeneration() {
+      if (!currentJobId) return;
+      $("stop-btn").disabled = true;
+      try {
+        await api(
+          "/api/chat/jobs/" + encodeURIComponent(currentJobId) + "/stop",
+          { method: "POST" },
+        );
+      } catch (_) {
+        $("stop-btn").disabled = false;
+      }
+    }
+
+    async function startAssistantGeneration() {
+      setBusyState(true);
+      await persistConversation();
+
+      const contentEl = appendMsg(
+        "assistant",
+        "思考中…",
+        false,
+        { showActions: false },
+      );
+      const statusEl = appendMsg("status", "正在提交后台任务…", true);
+      try {
+        const res = await api("/api/chat/jobs", {
+          method: "POST",
+          body: JSON.stringify({
+            model: $("model-select").value || null,
+            messages: history.map((m) => ({ role: m.role, content: m.content })),
+            conversation_id: currentConversationId,
+            title: currentTitle(),
+          }),
+        });
+        if (res.status === 401) {
+          clearAuth();
+          location.reload();
+          return;
+        }
+        const job = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(job.detail || "后台任务提交失败");
+        currentJobId = job.id;
+        statusEl.textContent = job.status_message || "后台生成中…";
+        pollJob(job.id, contentEl, statusEl, true);
+      } catch (e) {
+        const row = statusEl.closest(".msg");
+        if (row) row.remove();
+        setAssistantContent(contentEl, "请求失败：" + e.message);
+        setBusyState(false);
+      }
+    }
+
+    async function retryMessage(messageIndex) {
+      if (busy || !history[messageIndex]) return;
+      let userIndex = messageIndex;
+      if (history[messageIndex].role !== "user") {
+        userIndex = -1;
+        for (let index = messageIndex - 1; index >= 0; index--) {
+          if (history[index].role === "user") {
+            userIndex = index;
+            break;
+          }
+        }
+      }
+      if (userIndex < 0) return;
+      const previousScrollTop = $("messages").scrollTop;
+      history = history.slice(0, userIndex + 1);
+      renderConversation();
+      $("messages").scrollTop = Math.min(
+        previousScrollTop,
+        Math.max(0, $("messages").scrollHeight - $("messages").clientHeight),
+      );
+      await startAssistantGeneration();
+    }
 
     async function send() {
       if (busy) return;
@@ -431,110 +1539,12 @@
       autoResize();
 
       history.push({ role: "user", content: text });
-      appendMsg("user", text);
-
-      busy = true;
-      $("send-btn").disabled = true;
-      $("model-select").disabled = true;
-
-      const contentEl = appendMsg("assistant", "思考中…");
-      let full = "";
-      let statusEl = null;
-      let gotContent = false;
-      const controller = new AbortController();
-      const selectedModel = $("model-select").value || "";
-      const requestTimeout = selectedModel.startsWith("deepseek-") ? 180000 : 120000;
-      const requestTimer = setTimeout(() => controller.abort(), requestTimeout);
-
-      try {
-        const res = await api("/v1/chat/completions", {
-          method: "POST",
-          signal: controller.signal,
-          body: JSON.stringify({
-            model: selectedModel || null,
-            messages: history.map((m) => ({ role: m.role, content: m.content })),
-            stream: true,
-          }),
-        });
-
-        if (res.status === 401) {
-          contentEl.textContent = "登录已失效，请重新登录";
-          clearAuth();
-          setTimeout(() => location.reload(), 1200);
-          return;
-        }
-        if (!res.ok) {
-          const err = await res.text();
-          contentEl.textContent = "请求失败: " + err.slice(0, 400);
-          return;
-        }
-
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const parts = buf.split("\n");
-          buf = parts.pop() || "";
-          for (const line of parts) {
-            const t = line.trim();
-            if (!t.startsWith("data:")) continue;
-            const payload = t.slice(5).trim();
-            if (payload === "[DONE]") continue;
-            try {
-              const obj = JSON.parse(payload);
-              if (obj.status) {
-                const s = obj.status;
-                let label = s.message || "";
-                if (s.type === "thinking") label = "💭 思考中…";
-                else if (s.type === "tool_start")
-                  label = "🔧 调用工具: " + (s.tools || []).join(", ") + " (第 " + s.round + " 轮)";
-                else if (s.type === "tool_running")
-                  label = "⏳ 执行中: " + (s.tools || []).join(", ") + "…";
-                else if (s.type === "tool_done")
-                  label = "✓ 工具完成: " + (s.tools || []).join(", ");
-                else if (!label) label = JSON.stringify(s);
-                if (statusEl) statusEl.textContent = label;
-                else statusEl = appendMsg("status", label, true);
-                if (!gotContent) contentEl.textContent = "…";
-                continue;
-              }
-              const delta = (((obj.choices || [])[0] || {}).delta) || {};
-              if (delta.content) {
-                if (!gotContent) {
-                  full = "";
-                  gotContent = true;
-                }
-                full += delta.content;
-                contentEl.textContent = full;
-                $("messages").scrollTop = $("messages").scrollHeight;
-              }
-            } catch (_) {}
-          }
-        }
-
-        if (!gotContent) full = contentEl.textContent || "(无内容)";
-        if (full === "思考中…" || full === "…") full = "(无内容)";
-        contentEl.textContent = full;
-        history.push({ role: "assistant", content: full });
-      } catch (e) {
-        if (e.name === "AbortError") {
-          contentEl.textContent = gotContent
-            ? full + "\n\n[请求超时，连接已停止]"
-            : "请求等待过久，已自动停止，请重试。";
-        } else {
-          contentEl.textContent = "网络错误: " + e.message;
-        }
-      } finally {
-        clearTimeout(requestTimer);
-        busy = false;
-        $("send-btn").disabled = false;
-        $("model-select").disabled = false;
-        $("input").focus();
-      }
+      appendMsg("user", text, false, {
+        messageIndex: history.length - 1,
+        showActions: true,
+        followIfNearBottom: true,
+      });
+      await startAssistantGeneration();
     }
 
     init();
