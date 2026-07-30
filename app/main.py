@@ -10,7 +10,7 @@ from typing import Any, List, Optional
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -43,6 +43,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def disable_dynamic_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 MAX_USERS = 3
@@ -382,6 +393,24 @@ def delete_provider(provider_id: str, user: dict = Depends(require_admin)):
 @app.get("/api/conversations")
 def conversations(user: dict = Depends(require_user)):
     return {"data": users.list_conversations(user["id"], limit=10)}
+
+
+@app.get("/api/conversations/summaries")
+def conversation_summaries(user: dict = Depends(require_user)):
+    return {"data": users.list_conversation_summaries(user["id"], limit=10)}
+
+
+@app.get("/api/conversations/{conversation_id}")
+def conversation_detail(
+    conversation_id: str,
+    user: dict = Depends(require_user),
+):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{8,64}", conversation_id):
+        raise HTTPException(status_code=400, detail="无效的对话标识")
+    item = users.get_conversation(user["id"], conversation_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    return item
 
 
 @app.put("/api/conversations/{conversation_id}")

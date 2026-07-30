@@ -253,6 +253,53 @@ def list_conversations(user_id: int, limit: int = 10) -> list:
     return out
 
 
+def list_conversation_summaries(user_id: int, limit: int = 10) -> list:
+    """只返回历史选择器需要的元数据，避免一次传输全部对话正文。"""
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT id, title, updated_at
+            FROM conversations
+            WHERE user_id = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (user_id, max(1, min(limit, 10))),
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
+def get_conversation(user_id: int, conversation_id: str) -> Optional[dict]:
+    with _conn() as c:
+        row = c.execute(
+            """
+            SELECT id, title, messages_json, updated_at
+            FROM conversations
+            WHERE user_id = ? AND id = ?
+            """,
+            (user_id, conversation_id),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        messages = json.loads(row["messages_json"])
+    except (json.JSONDecodeError, TypeError):
+        messages = []
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "messages": messages,
+        "updated_at": row["updated_at"],
+    }
+
+
 def save_conversation(
     user_id: int,
     conversation_id: str,

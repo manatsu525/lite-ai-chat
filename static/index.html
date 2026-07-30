@@ -700,7 +700,7 @@
       const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
       const token = getToken();
       if (token) headers["Authorization"] = "Bearer " + token;
-      const res = await fetch(path, { ...opts, headers });
+      const res = await fetch(path, { cache: "no-store", ...opts, headers });
       return res;
     }
 
@@ -829,23 +829,44 @@
       renderConversation();
     }
 
+    async function loadConversationDetail(conversationId) {
+      const res = await api(
+        "/api/conversations/" + encodeURIComponent(conversationId),
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "对话内容加载失败");
+      if (!Array.isArray(data.messages)) throw new Error("对话内容格式错误");
+      let item = conversations.find((entry) => entry.id === conversationId);
+      if (!item) {
+        item = data;
+        conversations.unshift(item);
+      } else {
+        Object.assign(item, data);
+      }
+      currentConversationId = item.id;
+      history = item.messages.map((message) => ({
+        role: message.role,
+        content: message.content || "",
+      }));
+      renderConversationSelect();
+      renderConversation();
+      return item;
+    }
+
     async function loadConversations() {
       let lastError = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const res = await api("/api/conversations");
+          // 标题列表通常只有几 KB；正文仅按当前选择单独读取。
+          const res = await api("/api/conversations/summaries");
           const data = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error(data.detail || "对话历史加载失败");
           if (!Array.isArray(data.data)) throw new Error("对话历史格式错误");
           conversations = data.data;
           if (conversations.length) {
             currentConversationId = conversations[0].id;
-            history = (conversations[0].messages || []).map((item) => ({
-              role: item.role,
-              content: item.content || "",
-            }));
             renderConversationSelect();
-            renderConversation();
+            await loadConversationDetail(currentConversationId);
           } else {
             createConversation();
             await persistConversation(true);
@@ -906,19 +927,25 @@
       }
     }
 
-    $("conversation-select").addEventListener("change", (e) => {
+    $("conversation-select").addEventListener("change", async (e) => {
       if (busy) {
         e.target.value = currentConversationId;
         return;
       }
-      const item = conversations.find((entry) => entry.id === e.target.value);
+      const nextId = e.target.value;
+      const item = conversations.find((entry) => entry.id === nextId);
       if (!item) return;
-      currentConversationId = item.id;
-      history = (item.messages || []).map((message) => ({
-        role: message.role,
-        content: message.content || "",
-      }));
-      renderConversation();
+      const previousId = currentConversationId;
+      e.target.disabled = true;
+      try {
+        await loadConversationDetail(nextId);
+      } catch (error) {
+        console.error("对话内容加载失败", error);
+        e.target.value = previousId;
+        alert("对话内容加载失败，请重试");
+      } finally {
+        e.target.disabled = false;
+      }
     });
 
     $("new-chat-btn").onclick = async () => {
@@ -939,15 +966,10 @@
         await api("/api/conversations/" + encodeURIComponent(deleting), { method: "DELETE" });
       } catch (_) {}
       if (conversations.length) {
-        currentConversationId = conversations[0].id;
-        history = (conversations[0].messages || []).map((item) => ({
-          role: item.role,
-          content: item.content || "",
-        }));
-        renderConversationSelect();
-        renderConversation();
+        await loadConversationDetail(conversations[0].id);
       } else {
         createConversation();
+        await persistConversation(true);
       }
     };
 
@@ -1688,11 +1710,8 @@
         const res = await api("/api/chat/jobs/active");
         if (!res.ok) return;
         const payload = await res.json();
-        if (!payload.job) {
-          // 避免任务恰好在首次加载历史后完成而漏掉最后一条回答。
-          await loadConversations();
-          return;
-        }
+        if (!payload.job) return;
+        await loadConversationDetail(payload.job.conversation_id);
         currentJobId = payload.job.id;
         setBusyState(true);
         const ui = showJobInConversation(payload.job);
