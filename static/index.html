@@ -21,11 +21,17 @@
       --font: "Segoe UI", system-ui, -apple-system, sans-serif;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html {
+      height: 100%;
+      overflow: hidden;
+    }
     body {
       font-family: var(--font);
       background: var(--bg);
       color: var(--text);
-      min-height: 100vh;
+      height: 100%;
+      min-height: 0;
+      overflow: hidden;
       display: flex;
       flex-direction: column;
     }
@@ -68,6 +74,8 @@
     /* ---- Login ---- */
     #login-view {
       flex: 1;
+      min-height: 0;
+      overflow-y: auto;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -110,6 +118,11 @@
       display: none;
       flex-direction: column;
       height: 100vh;
+      height: 100dvh;
+      height: var(--app-height, 100dvh);
+      max-height: var(--app-height, 100dvh);
+      min-height: 0;
+      overflow: hidden;
     }
     header {
       display: flex;
@@ -194,6 +207,7 @@
     }
     #messages {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
       overflow-anchor: none;
       padding: 1rem;
@@ -485,6 +499,19 @@
     @media (max-width: 600px) {
       .settings-grid { grid-template-columns: 1fr; }
       .settings-grid .wide { grid-column: auto; }
+      .composer {
+        padding: 0.45rem 0.55rem calc(0.45rem + env(safe-area-inset-bottom));
+      }
+      .composer-inner { gap: 0.35rem; }
+      .composer textarea { min-height: 40px; }
+      .composer button {
+        height: 40px;
+        padding: 0 0.75rem;
+      }
+      .hint {
+        margin-top: 0.25rem;
+        font-size: 0.68rem;
+      }
     }
   </style>
 </head>
@@ -637,6 +664,26 @@
 
     const $ = (id) => document.getElementById(id);
 
+    // Android 浏览器的地址栏会让 100vh 高于实际可见区域；始终使用真实视口高度。
+    let viewportFrame = 0;
+    function syncAppHeight() {
+      cancelAnimationFrame(viewportFrame);
+      viewportFrame = requestAnimationFrame(() => {
+        const viewport = window.visualViewport;
+        const height = viewport ? viewport.height : window.innerHeight;
+        document.documentElement.style.setProperty(
+          "--app-height",
+          Math.max(1, Math.round(height)) + "px",
+        );
+      });
+    }
+    syncAppHeight();
+    window.addEventListener("resize", syncAppHeight);
+    window.addEventListener("orientationchange", syncAppHeight);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", syncAppHeight);
+    }
+
     function getToken() {
       return localStorage.getItem(TOKEN_KEY) || "";
     }
@@ -783,29 +830,52 @@
     }
 
     async function loadConversations() {
-      try {
-        const res = await api("/api/conversations");
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || "对话历史加载失败");
-        conversations = data.data || [];
-        if (conversations.length) {
-          currentConversationId = conversations[0].id;
-          history = (conversations[0].messages || []).map((item) => ({
-            role: item.role,
-            content: item.content || "",
-          }));
-          renderConversationSelect();
-          renderConversation();
-        } else {
-          createConversation();
+      let lastError = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const res = await api("/api/conversations");
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || "对话历史加载失败");
+          if (!Array.isArray(data.data)) throw new Error("对话历史格式错误");
+          conversations = data.data;
+          if (conversations.length) {
+            currentConversationId = conversations[0].id;
+            history = (conversations[0].messages || []).map((item) => ({
+              role: item.role,
+              content: item.content || "",
+            }));
+            renderConversationSelect();
+            renderConversation();
+          } else {
+            createConversation();
+            await persistConversation(true);
+          }
+          $("new-chat-btn").disabled = false;
+          $("delete-chat-btn").disabled = false;
+          return true;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 2) {
+            await new Promise((resolve) => setTimeout(resolve, 350 * (attempt + 1)));
+          }
         }
-      } catch (_) {
-        createConversation();
       }
+      // 不再把加载失败静默伪装成“没有历史”，也不覆盖页面已有的对话。
+      if (!conversations.length) {
+        currentConversationId = "";
+        history = [];
+        const select = $("conversation-select");
+        select.innerHTML = '<option value="">历史加载失败，请刷新重试</option>';
+        $("new-chat-btn").disabled = true;
+        $("delete-chat-btn").disabled = true;
+        renderConversation();
+      }
+      console.error("对话历史加载失败", lastError);
+      return false;
     }
 
-    async function persistConversation() {
-      if (!currentConversationId || !history.length) return;
+    async function persistConversation(allowEmpty = false) {
+      if (!currentConversationId || (!history.length && !allowEmpty)) return false;
       const title = currentTitle();
       let item = conversations.find((entry) => entry.id === currentConversationId);
       if (!item) {
@@ -821,11 +891,19 @@
       conversations = [item, ...conversations.filter((entry) => entry.id !== item.id)].slice(0, 10);
       renderConversationSelect();
       try {
-        await api("/api/conversations/" + encodeURIComponent(currentConversationId), {
+        const res = await api("/api/conversations/" + encodeURIComponent(currentConversationId), {
           method: "PUT",
           body: JSON.stringify({ title, messages: item.messages }),
         });
-      } catch (_) {}
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || "对话保存失败");
+        }
+        return true;
+      } catch (error) {
+        console.error("对话保存失败", error);
+        return false;
+      }
     }
 
     $("conversation-select").addEventListener("change", (e) => {
@@ -843,8 +921,13 @@
       renderConversation();
     });
 
-    $("new-chat-btn").onclick = () => {
-      if (!busy) createConversation();
+    $("new-chat-btn").onclick = async () => {
+      if (busy) return;
+      const current = conversations.find((item) => item.id === currentConversationId);
+      if (current && !(current.messages || []).length && !history.length) return;
+      createConversation();
+      // 即使尚未发送消息，刷新页面后这个新窗口仍然存在。
+      await persistConversation(true);
     };
 
     $("delete-chat-btn").onclick = async () => {
