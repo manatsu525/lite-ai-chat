@@ -412,6 +412,29 @@
     }
     .model-option:hover { background: var(--bg); }
     .model-option input { width: auto; margin-top: 0.18rem; }
+    .account-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.55rem;
+      margin: 0.8rem 0 1rem;
+    }
+    .account-row {
+      display: flex;
+      align-items: center;
+      gap: 0.7rem;
+      padding: 0.7rem 0.8rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    .account-info { flex: 1; min-width: 0; }
+    .account-name { font-weight: 600; word-break: break-all; }
+    .account-meta {
+      margin-top: 0.15rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+    .account-row button { flex-shrink: 0; }
     @media (max-width: 600px) {
       .settings-grid { grid-template-columns: 1fr; }
       .settings-grid .wide { grid-column: auto; }
@@ -445,6 +468,7 @@
         <select id="model-select" aria-label="选择模型" title="选择模型"></select>
         <span id="who"></span>
         <button class="ghost" id="settings-btn" type="button">API / 模型</button>
+        <button class="ghost" id="admin-btn" type="button" style="display:none">账号管理</button>
         <button class="ghost" id="clear-btn" type="button">清空</button>
         <button class="ghost" id="logout-btn" type="button">退出</button>
       </div>
@@ -520,6 +544,33 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="admin-modal" role="dialog" aria-modal="true">
+    <div class="settings-card">
+      <div class="settings-head">
+        <h2>账号管理</h2>
+        <button class="ghost" id="admin-close" type="button">关闭</button>
+      </div>
+      <p class="settings-note" id="account-limit-note">
+        最多 3 个账号；各账号的对话历史与后台任务相互独立。
+      </p>
+      <div class="account-list" id="account-list"></div>
+      <div class="settings-grid">
+        <div class="field">
+          <label for="account-username">新账号用户名</label>
+          <input id="account-username" maxlength="40" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="account-password">新账号密码</label>
+          <input id="account-password" type="password" maxlength="72" autocomplete="new-password" />
+        </div>
+      </div>
+      <div class="settings-actions">
+        <button id="account-create" type="button">新增普通账号</button>
+      </div>
+      <div class="settings-status" id="account-status"></div>
+    </div>
+  </div>
+
   <script>
     const TOKEN_KEY = "lite_ai_token";
     const USER_KEY = "lite_ai_user";
@@ -534,6 +585,8 @@
     let currentConversationId = "";
     let currentJobId = "";
     let jobPollTimer = null;
+    let isAdmin = false;
+    let currentUserId = 0;
 
     const $ = (id) => document.getElementById(id);
 
@@ -563,7 +616,8 @@
         const res = await api("/api/auth/me");
         if (res.ok) {
           const me = await res.json();
-          showChat(me.username);
+          currentUserId = Number(me.id) || 0;
+          showChat(me.username, me.is_admin);
           return;
         }
         clearAuth();
@@ -583,10 +637,13 @@
       $("chat-view").style.display = "none";
     }
 
-    async function showChat(username) {
+    async function showChat(username, adminFlag) {
+      isAdmin = Boolean(adminFlag);
       $("login-view").style.display = "none";
       $("chat-view").style.display = "flex";
       $("who").textContent = username || localStorage.getItem(USER_KEY) || "";
+      $("settings-btn").style.display = isAdmin ? "" : "none";
+      $("admin-btn").style.display = isAdmin ? "" : "none";
       await Promise.all([loadModels(), loadConversations()]);
       await resumeActiveJob();
     }
@@ -840,6 +897,7 @@
     }
 
     async function openSettings() {
+      if (!isAdmin) return;
       $("settings-modal").classList.add("open");
       setProviderStatus("正在读取配置…");
       try {
@@ -875,6 +933,123 @@
       if (e.target === $("settings-modal")) $("settings-close").click();
     });
     $("provider-select").addEventListener("change", (e) => applyProvider(e.target.value));
+
+    function setAccountStatus(message, type = "") {
+      const status = $("account-status");
+      status.textContent = message || "";
+      status.className = "settings-status " + type;
+    }
+
+    function renderAccounts(payload) {
+      const list = $("account-list");
+      const accounts = payload.data || [];
+      const maxUsers = payload.max_users || 3;
+      currentUserId = Number(payload.current_user_id) || currentUserId;
+      list.innerHTML = "";
+      for (const account of accounts) {
+        const row = document.createElement("div");
+        row.className = "account-row";
+        const info = document.createElement("div");
+        info.className = "account-info";
+        const name = document.createElement("div");
+        name.className = "account-name";
+        name.textContent = account.username;
+        const meta = document.createElement("div");
+        meta.className = "account-meta";
+        meta.textContent = account.is_admin ? "管理员" : "普通账号";
+        info.appendChild(name);
+        info.appendChild(meta);
+        row.appendChild(info);
+        if (!account.is_admin && Number(account.id) !== currentUserId) {
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "danger account-delete";
+          remove.dataset.userId = account.id;
+          remove.dataset.username = account.username;
+          remove.textContent = "删除";
+          row.appendChild(remove);
+        }
+        list.appendChild(row);
+      }
+      $("account-limit-note").textContent =
+        "当前 " + accounts.length + " / " + maxUsers +
+        " 个账号；各账号的对话历史与后台任务相互独立。";
+      $("account-create").disabled = accounts.length >= maxUsers;
+      $("account-username").disabled = accounts.length >= maxUsers;
+      $("account-password").disabled = accounts.length >= maxUsers;
+    }
+
+    async function loadAccounts() {
+      const res = await api("/api/admin/users");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "账号列表加载失败");
+      renderAccounts(data);
+    }
+
+    $("admin-btn").onclick = async () => {
+      if (!isAdmin) return;
+      $("admin-modal").classList.add("open");
+      setAccountStatus("正在读取账号…");
+      try {
+        await loadAccounts();
+        setAccountStatus("");
+      } catch (e) {
+        setAccountStatus(e.message, "bad");
+      }
+    };
+    $("admin-close").onclick = () => {
+      $("account-password").value = "";
+      $("admin-modal").classList.remove("open");
+    };
+    $("admin-modal").addEventListener("click", (e) => {
+      if (e.target === $("admin-modal")) $("admin-close").click();
+    });
+    $("account-create").onclick = async () => {
+      const username = $("account-username").value.trim();
+      const password = $("account-password").value;
+      if (!username || !password) {
+        setAccountStatus("请输入用户名和密码。", "bad");
+        return;
+      }
+      $("account-create").disabled = true;
+      setAccountStatus("正在创建账号…");
+      try {
+        const res = await api("/api/admin/users", {
+          method: "POST",
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "账号创建失败");
+        $("account-username").value = "";
+        $("account-password").value = "";
+        await loadAccounts();
+        setAccountStatus("账号已创建。", "ok");
+      } catch (e) {
+        setAccountStatus(e.message, "bad");
+        $("account-create").disabled = false;
+      }
+    };
+    $("account-list").addEventListener("click", async (e) => {
+      const button = e.target.closest(".account-delete");
+      if (!button) return;
+      const userId = Number(button.dataset.userId);
+      if (!userId || userId === currentUserId) return;
+      if (!confirm("删除账号“" + button.dataset.username + "”及其全部对话数据？")) return;
+      button.disabled = true;
+      setAccountStatus("正在删除账号…");
+      try {
+        const res = await api("/api/admin/users/" + encodeURIComponent(userId), {
+          method: "DELETE",
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "账号删除失败");
+        await loadAccounts();
+        setAccountStatus("账号及其对话数据已删除。", "ok");
+      } catch (error) {
+        button.disabled = false;
+        setAccountStatus(error.message, "bad");
+      }
+    });
 
     $("provider-test").onclick = async () => {
       const body = providerPayload();
@@ -997,7 +1172,9 @@
           return;
         }
         setAuth(data.token, data.username);
-        showChat(data.username);
+        currentUserId = Number(data.id) || 0;
+        isAdmin = Boolean(data.is_admin);
+        showChat(data.username, data.is_admin);
       } catch (e) {
         $("login-error").textContent = "网络错误";
       }
@@ -1346,6 +1523,7 @@
       $("delete-chat-btn").disabled = value;
       $("clear-btn").disabled = value;
       $("settings-btn").disabled = value;
+      $("admin-btn").disabled = value;
       $("stop-btn").style.display = value ? "" : "none";
       $("stop-btn").disabled = false;
     }

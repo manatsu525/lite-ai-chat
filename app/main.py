@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from . import jobs, users
 from .agent import run_agent_stream, run_agent_sync
-from .auth import create_token, require_user
+from .auth import create_token, require_admin, require_user
 from .config import (
     HOST,
     JWT_EXPIRE_DAYS,
@@ -45,12 +45,13 @@ app.add_middleware(
 )
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+MAX_USERS = 3
 
 
 # ---------- 请求体 ----------
 class AuthBody(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=2, max_length=40)
+    password: str = Field(min_length=4, max_length=72)
 
 
 class ChatMessage(BaseModel):
@@ -208,7 +209,7 @@ def register(body: AuthBody, response: Response):
     if users.user_count() > 0:
         raise HTTPException(status_code=403, detail="已初始化，禁止公开注册")
     try:
-        u = users.create_user(body.username, body.password)
+        u = users.create_user(body.username, body.password, is_admin=True)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     token = create_token(u["id"], u["username"])
@@ -220,7 +221,13 @@ def register(body: AuthBody, response: Response):
         max_age=JWT_EXPIRE_DAYS * 86400,
         path="/",
     )
-    return {"token": token, "username": u["username"], "expire_days": JWT_EXPIRE_DAYS}
+    return {
+        "token": token,
+        "id": u["id"],
+        "username": u["username"],
+        "is_admin": True,
+        "expire_days": JWT_EXPIRE_DAYS,
+    }
 
 
 @app.post("/api/auth/login")
@@ -237,7 +244,13 @@ def login(body: AuthBody, response: Response):
         max_age=JWT_EXPIRE_DAYS * 86400,
         path="/",
     )
-    return {"token": token, "username": u["username"], "expire_days": JWT_EXPIRE_DAYS}
+    return {
+        "token": token,
+        "id": u["id"],
+        "username": u["username"],
+        "is_admin": bool(u["is_admin"]),
+        "expire_days": JWT_EXPIRE_DAYS,
+    }
 
 
 @app.post("/api/auth/logout")
@@ -248,17 +261,64 @@ def logout(response: Response):
 
 @app.get("/api/auth/me")
 def me(user: dict = Depends(require_user)):
-    return {"id": user["id"], "username": user["username"]}
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "is_admin": bool(user["is_admin"]),
+    }
+
+
+# ---------- 管理员账号管理（最多 3 个） ----------
+@app.get("/api/admin/users")
+def admin_users(admin: dict = Depends(require_admin)):
+    return {
+        "data": users.list_users(),
+        "max_users": MAX_USERS,
+        "current_user_id": admin["id"],
+    }
+
+
+@app.post("/api/admin/users")
+def admin_create_user(body: AuthBody, admin: dict = Depends(require_admin)):
+    try:
+        created = users.create_user(
+            body.username,
+            body.password,
+            is_admin=False,
+            max_users=MAX_USERS,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "id": created["id"],
+        "username": created["username"],
+        "is_admin": False,
+    }
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: int,
+    admin: dict = Depends(require_admin),
+):
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="不能删除当前管理员账号")
+    await jobs.stop_active_job_for_user(user_id)
+    try:
+        users.delete_managed_user(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
 
 
 # ---------- API 与模型设置 ----------
 @app.get("/api/settings/providers")
-def provider_settings(user: dict = Depends(require_user)):
+def provider_settings(user: dict = Depends(require_admin)):
     return {"providers": provider_settings_public()}
 
 
 @app.post("/api/settings/providers/test")
-async def test_provider(body: ProviderBody, user: dict = Depends(require_user)):
+async def test_provider(body: ProviderBody, user: dict = Depends(require_admin)):
     api_base, api_key = _provider_credentials(body)
     manual_models = _clean_model_ids(body.selected_models)
     models_warning = ""
@@ -283,7 +343,7 @@ async def test_provider(body: ProviderBody, user: dict = Depends(require_user)):
 
 
 @app.post("/api/settings/providers")
-async def save_provider(body: ProviderBody, user: dict = Depends(require_user)):
+async def save_provider(body: ProviderBody, user: dict = Depends(require_admin)):
     api_base, api_key = _provider_credentials(body)
     selected = _clean_model_ids(body.selected_models)
     if not selected:
@@ -311,7 +371,7 @@ async def save_provider(body: ProviderBody, user: dict = Depends(require_user)):
 
 
 @app.delete("/api/settings/providers/{provider_id}")
-def delete_provider(provider_id: str, user: dict = Depends(require_user)):
+def delete_provider(provider_id: str, user: dict = Depends(require_admin)):
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,40}", provider_id):
         raise HTTPException(status_code=400, detail="无效的提供商标识")
     delete_provider_config(provider_id)
