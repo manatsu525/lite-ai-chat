@@ -150,6 +150,24 @@
     }
     #conversation-select { flex: 1; min-width: 0; }
     .session-bar button { flex-shrink: 0; }
+    .history-pager {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      flex-shrink: 0;
+    }
+    .history-pager button {
+      width: 2.15rem;
+      padding-left: 0;
+      padding-right: 0;
+    }
+    #history-page-label {
+      min-width: 2.9rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      text-align: center;
+      white-space: nowrap;
+    }
     @media (max-width: 680px) {
       header {
         align-items: center;
@@ -203,6 +221,16 @@
         font-size: 0.7rem;
         line-height: 1;
         white-space: nowrap;
+      }
+      .history-pager { gap: 0.15rem; }
+      .history-pager button {
+        width: 1.8rem;
+        padding-left: 0;
+        padding-right: 0;
+      }
+      #history-page-label {
+        min-width: 2.35rem;
+        font-size: 0.65rem;
       }
     }
     #messages {
@@ -549,6 +577,11 @@
     </header>
     <div class="session-bar">
       <select id="conversation-select" aria-label="最近对话"></select>
+      <div class="history-pager" aria-label="历史分页">
+        <button class="ghost" id="history-prev" type="button" title="上一页" aria-label="上一页">‹</button>
+        <span id="history-page-label">1/1</span>
+        <button class="ghost" id="history-next" type="button" title="下一页" aria-label="下一页">›</button>
+      </div>
       <button class="ghost" id="new-chat-btn" type="button">新对话</button>
       <button class="danger" id="delete-chat-btn" type="button">删除</button>
     </div>
@@ -656,6 +689,9 @@
     let testedModels = [];
     let savedProviderModels = [];
     let conversations = [];
+    let conversationPage = 1;
+    let conversationTotal = 0;
+    let conversationTotalPages = 1;
     let currentConversationId = "";
     let currentJobId = "";
     let jobPollTimer = null;
@@ -795,6 +831,15 @@
         select.appendChild(option);
       }
       select.value = currentConversationId;
+      renderHistoryPager();
+    }
+
+    function renderHistoryPager() {
+      $("history-page-label").textContent =
+        conversationPage + "/" + conversationTotalPages;
+      $("history-prev").disabled = busy || conversationPage <= 1;
+      $("history-next").disabled =
+        busy || conversationPage >= conversationTotalPages;
     }
 
     function renderConversation() {
@@ -853,18 +898,26 @@
       return item;
     }
 
-    async function loadConversations() {
+    async function loadConversations(page = 1, preferredId = "") {
       let lastError = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           // 标题列表通常只有几 KB；正文仅按当前选择单独读取。
-          const res = await api("/api/conversations/summaries");
+          const res = await api(
+            "/api/conversations/summaries?page=" + encodeURIComponent(page),
+          );
           const data = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error(data.detail || "对话历史加载失败");
           if (!Array.isArray(data.data)) throw new Error("对话历史格式错误");
           conversations = data.data;
+          conversationPage = Number(data.page) || 1;
+          conversationTotal = Number(data.total) || 0;
+          conversationTotalPages = Number(data.total_pages) || 1;
           if (conversations.length) {
-            currentConversationId = conversations[0].id;
+            const preferred = conversations.find((item) => item.id === preferredId);
+            currentConversationId = preferred
+              ? preferred.id
+              : conversations[0].id;
             renderConversationSelect();
             await loadConversationDetail(currentConversationId);
           } else {
@@ -889,6 +942,10 @@
         select.innerHTML = '<option value="">历史加载失败，请刷新重试</option>';
         $("new-chat-btn").disabled = true;
         $("delete-chat-btn").disabled = true;
+        conversationPage = 1;
+        conversationTotal = 0;
+        conversationTotalPages = 1;
+        renderHistoryPager();
         renderConversation();
       }
       console.error("对话历史加载失败", lastError);
@@ -948,13 +1005,26 @@
       }
     });
 
+    $("history-prev").onclick = async () => {
+      if (busy || conversationPage <= 1) return;
+      await loadConversations(conversationPage - 1);
+    };
+
+    $("history-next").onclick = async () => {
+      if (busy || conversationPage >= conversationTotalPages) return;
+      await loadConversations(conversationPage + 1);
+    };
+
     $("new-chat-btn").onclick = async () => {
       if (busy) return;
       const current = conversations.find((item) => item.id === currentConversationId);
       if (current && !(current.messages || []).length && !history.length) return;
       createConversation();
       // 即使尚未发送消息，刷新页面后这个新窗口仍然存在。
-      await persistConversation(true);
+      const createdId = currentConversationId;
+      if (await persistConversation(true)) {
+        await loadConversations(1, createdId);
+      }
     };
 
     $("delete-chat-btn").onclick = async () => {
@@ -965,12 +1035,7 @@
       try {
         await api("/api/conversations/" + encodeURIComponent(deleting), { method: "DELETE" });
       } catch (_) {}
-      if (conversations.length) {
-        await loadConversationDetail(conversations[0].id);
-      } else {
-        createConversation();
-        await persistConversation(true);
-      }
+      await loadConversations(conversationPage);
     };
 
     function providerPayload() {
@@ -1671,6 +1736,9 @@
       $("send-btn").disabled = value;
       $("model-select").disabled = value;
       $("conversation-select").disabled = value;
+      $("history-prev").disabled = value || conversationPage <= 1;
+      $("history-next").disabled =
+        value || conversationPage >= conversationTotalPages;
       $("new-chat-btn").disabled = value;
       $("delete-chat-btn").disabled = value;
       $("clear-btn").disabled = value;

@@ -4,6 +4,9 @@
 - OpenAI 兼容 POST /v1/chat/completions（含 SSE 流式 + 多轮工具）
 - 静态前端
 """
+import asyncio
+from contextlib import suppress
+import logging
 from pathlib import Path
 import re
 from typing import Any, List, Optional
@@ -36,6 +39,8 @@ from .config import (
 users.init_db()
 
 app = FastAPI(title="Lite AI Chat", version="1.0.0", docs_url=None, redoc_url=None)
+logger = logging.getLogger("lite-ai-chat")
+_cleanup_task: Optional[asyncio.Task] = None
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -57,6 +62,44 @@ async def disable_dynamic_cache(request: Request, call_next):
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 MAX_USERS = 3
+DATA_CLEANUP_INTERVAL = 30 * 24 * 60 * 60
+
+
+async def _periodic_storage_cleanup() -> None:
+    while True:
+        try:
+            result = await asyncio.to_thread(
+                users.cleanup_storage,
+                max_conversations=100,
+                max_jobs=30,
+            )
+            if (
+                result["removed_conversations"]
+                or result["removed_jobs"]
+                or result["vacuumed"]
+            ):
+                logger.info("定期数据清理完成：%s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("定期数据清理失败")
+        await asyncio.sleep(DATA_CLEANUP_INTERVAL)
+
+
+@app.on_event("startup")
+async def start_storage_cleanup() -> None:
+    global _cleanup_task
+    _cleanup_task = asyncio.create_task(_periodic_storage_cleanup())
+
+
+@app.on_event("shutdown")
+async def stop_storage_cleanup() -> None:
+    global _cleanup_task
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _cleanup_task
+    _cleanup_task = None
 
 
 # ---------- 请求体 ----------
@@ -396,8 +439,25 @@ def conversations(user: dict = Depends(require_user)):
 
 
 @app.get("/api/conversations/summaries")
-def conversation_summaries(user: dict = Depends(require_user)):
-    return {"data": users.list_conversation_summaries(user["id"], limit=10)}
+def conversation_summaries(
+    page: int = 1,
+    user: dict = Depends(require_user),
+):
+    page_size = 10
+    total = users.count_conversations(user["id"])
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    current_page = max(1, min(int(page), total_pages))
+    return {
+        "data": users.list_conversation_summaries(
+            user["id"],
+            limit=page_size,
+            offset=(current_page - 1) * page_size,
+        ),
+        "page": current_page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+    }
 
 
 @app.get("/api/conversations/{conversation_id}")

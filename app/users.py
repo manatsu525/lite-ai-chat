@@ -253,7 +253,20 @@ def list_conversations(user_id: int, limit: int = 10) -> list:
     return out
 
 
-def list_conversation_summaries(user_id: int, limit: int = 10) -> list:
+def count_conversations(user_id: int) -> int:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT COUNT(*) AS n FROM conversations WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return int(row["n"])
+
+
+def list_conversation_summaries(
+    user_id: int,
+    limit: int = 10,
+    offset: int = 0,
+) -> list:
     """只返回历史选择器需要的元数据，避免一次传输全部对话正文。"""
     with _conn() as c:
         rows = c.execute(
@@ -262,9 +275,9 @@ def list_conversation_summaries(user_id: int, limit: int = 10) -> list:
             FROM conversations
             WHERE user_id = ?
             ORDER BY updated_at DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (user_id, max(1, min(limit, 10))),
+            (user_id, max(1, min(limit, 10)), max(0, int(offset))),
         ).fetchall()
     return [
         {
@@ -327,7 +340,7 @@ def save_conversation(
                 SELECT id FROM conversations
                 WHERE user_id = ?
                 ORDER BY updated_at DESC
-                LIMIT -1 OFFSET 10
+                LIMIT -1 OFFSET 100
                 """,
                 (user_id,),
             ).fetchall()
@@ -347,6 +360,130 @@ def delete_conversation(user_id: int, conversation_id: str) -> None:
                 (user_id, conversation_id),
             )
             c.commit()
+
+
+def cleanup_storage(
+    max_conversations: int = 100,
+    max_jobs: int = 30,
+) -> dict:
+    """限制每个账号的持久化数据，并在值得时回收 SQLite 文件空间。"""
+    max_conversations = max(1, min(int(max_conversations), 100))
+    max_jobs = max(1, min(int(max_jobs), 30))
+    active_statuses = ("queued", "running", "stopping")
+    removed_conversations = 0
+    removed_jobs = 0
+    vacuumed = False
+
+    with _lock:
+        with _conn() as c:
+            user_ids = [
+                int(row["id"])
+                for row in c.execute("SELECT id FROM users").fetchall()
+            ]
+
+            # 先移除已不存在账号留下的非活动任务。
+            cursor = c.execute(
+                """
+                DELETE FROM chat_jobs
+                WHERE user_id NOT IN (SELECT id FROM users)
+                  AND status NOT IN (?, ?, ?)
+                """,
+                active_statuses,
+            )
+            removed_jobs += max(0, cursor.rowcount)
+
+            for user_id in user_ids:
+                old_rows = c.execute(
+                    """
+                    SELECT id
+                    FROM conversations
+                    WHERE user_id = ?
+                    ORDER BY updated_at DESC
+                    LIMIT -1 OFFSET ?
+                    """,
+                    (user_id, max_conversations),
+                ).fetchall()
+                for row in old_rows:
+                    conversation_id = row["id"]
+                    active = c.execute(
+                        """
+                        SELECT 1 FROM chat_jobs
+                        WHERE user_id = ? AND conversation_id = ?
+                          AND status IN (?, ?, ?)
+                        LIMIT 1
+                        """,
+                        (user_id, conversation_id, *active_statuses),
+                    ).fetchone()
+                    if active:
+                        continue
+                    cursor = c.execute(
+                        """
+                        DELETE FROM chat_jobs
+                        WHERE user_id = ? AND conversation_id = ?
+                        """,
+                        (user_id, conversation_id),
+                    )
+                    removed_jobs += max(0, cursor.rowcount)
+                    cursor = c.execute(
+                        """
+                        DELETE FROM conversations
+                        WHERE user_id = ? AND id = ?
+                        """,
+                        (user_id, conversation_id),
+                    )
+                    removed_conversations += max(0, cursor.rowcount)
+
+                # 已完成任务只保留最近 30 条；活动任务永不被维护任务误删。
+                old_jobs = c.execute(
+                    """
+                    SELECT id FROM chat_jobs
+                    WHERE user_id = ?
+                      AND status NOT IN (?, ?, ?)
+                    ORDER BY created_at DESC
+                    LIMIT -1 OFFSET ?
+                    """,
+                    (user_id, *active_statuses, max_jobs),
+                ).fetchall()
+                if old_jobs:
+                    cursor = c.executemany(
+                        "DELETE FROM chat_jobs WHERE user_id = ? AND id = ?",
+                        [(user_id, row["id"]) for row in old_jobs],
+                    )
+                    removed_jobs += max(0, cursor.rowcount)
+
+            # 清除已没有对应窗口的非活动任务。
+            cursor = c.execute(
+                """
+                DELETE FROM chat_jobs
+                WHERE status NOT IN (?, ?, ?)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM conversations
+                    WHERE conversations.user_id = chat_jobs.user_id
+                      AND conversations.id = chat_jobs.conversation_id
+                  )
+                """,
+                active_statuses,
+            )
+            removed_jobs += max(0, cursor.rowcount)
+            c.commit()
+
+            page_count = int(c.execute("PRAGMA page_count").fetchone()[0])
+            free_pages = int(c.execute("PRAGMA freelist_count").fetchone()[0])
+            page_size = int(c.execute("PRAGMA page_size").fetchone()[0])
+            # 文件至少 1 MiB 且超过 25% 是空页时才压缩，避免小鸡频繁 VACUUM。
+            if (
+                page_count > 0
+                and page_count * page_size >= 1024 * 1024
+                and free_pages / page_count >= 0.25
+            ):
+                c.execute("VACUUM")
+                vacuumed = True
+
+    return {
+        "removed_conversations": removed_conversations,
+        "removed_jobs": removed_jobs,
+        "vacuumed": vacuumed,
+    }
 
 
 def create_chat_job(
