@@ -138,12 +138,59 @@
     #conversation-select { flex: 1; min-width: 0; }
     .session-bar button { flex-shrink: 0; }
     @media (max-width: 680px) {
-      header { align-items: flex-start; gap: 0.6rem; }
-      header .user-meta { flex-wrap: wrap; justify-content: flex-end; }
+      header {
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.4rem 0.55rem;
+      }
+      header .brand {
+        width: 2.5rem;
+        flex: 0 0 2.5rem;
+        font-size: 0.7rem;
+        line-height: 1.15;
+      }
+      header .user-meta {
+        flex: 1;
+        min-width: 0;
+        display: grid;
+        grid-template-columns: repeat(4, max-content);
+        justify-content: end;
+        gap: 0.3rem;
+        font-size: 0.7rem;
+      }
       #who { display: none; }
-      #model-select { min-width: 170px; max-width: 205px; }
-      .session-bar { padding: 0.45rem 0.65rem; }
-      .session-bar button { padding: 0.5rem 0.65rem; }
+      #model-select {
+        grid-column: 1 / -1;
+        width: 100%;
+        min-width: 0;
+        max-width: none;
+        height: 2rem;
+        padding: 0.25rem 1.55rem 0.25rem 0.5rem;
+        font-size: 0.78rem;
+      }
+      header .user-meta button {
+        min-height: 1.85rem;
+        padding: 0.28rem 0.45rem;
+        font-size: 0.68rem;
+        line-height: 1;
+        white-space: nowrap;
+      }
+      .session-bar {
+        gap: 0.35rem;
+        padding: 0.35rem 0.55rem;
+      }
+      #conversation-select {
+        height: 2rem;
+        padding: 0.25rem 1.45rem 0.25rem 0.5rem;
+        font-size: 0.76rem;
+      }
+      .session-bar button {
+        min-height: 2rem;
+        padding: 0.3rem 0.48rem;
+        font-size: 0.7rem;
+        line-height: 1;
+        white-space: nowrap;
+      }
     }
     #messages {
       flex: 1;
