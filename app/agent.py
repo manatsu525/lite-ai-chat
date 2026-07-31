@@ -331,8 +331,8 @@ async def _apply_tool_calls(
     tool_calls: List[dict],
     assistant_message: Optional[dict] = None,
     max_search_results: int = 10,
-) -> List[str]:
-    """把 assistant tool_calls + tool 结果追加到 msgs，返回工具名列表。"""
+) -> List[dict]:
+    """把工具结果加入模型上下文，并返回适合前端展示的精简事件。"""
     # 模型可能主动请求 10 条；普通思考模式必须在执行层强制压到 5 条。
     for tc in tool_calls:
         fn = tc.get("function") or {}
@@ -351,7 +351,7 @@ async def _apply_tool_calls(
         args["num_results"] = max(1, min(requested, max_search_results))
         fn["arguments"] = json.dumps(args, ensure_ascii=False)
 
-    names = []
+    events = []
     assistant = {
         "role": "assistant",
         "content": (assistant_message or {}).get("content") or "",
@@ -366,7 +366,6 @@ async def _apply_tool_calls(
         name = fn.get("name") or ""
         args = fn.get("arguments") or "{}"
         tc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
-        names.append(name or "?")
         logger.info("exec tool %s args=%s", name, str(args)[:200])
         try:
             result = await asyncio.wait_for(
@@ -388,7 +387,96 @@ async def _apply_tool_calls(
             }
         )
         _enforce_tool_result_budget(msgs)
-    return names
+        events.append(_tool_trace_event(tc, result, state="done"))
+    return events
+
+
+def _tool_arguments(tool_call: dict) -> dict:
+    raw = (tool_call.get("function") or {}).get("arguments") or "{}"
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _tool_trace_event(
+    tool_call: dict,
+    result: Optional[str] = None,
+    state: str = "running",
+) -> dict:
+    """只暴露工具参数和有限结果；不把大段网页正文塞给轮询接口。"""
+    fn = tool_call.get("function") or {}
+    name = str(fn.get("name") or "tool")
+    args = _tool_arguments(tool_call)
+    event_id = "tool-" + str(tool_call.get("id") or uuid.uuid4().hex[:12])[:80]
+    event = {
+        "id": event_id,
+        "kind": "tool",
+        "tool": name,
+        "state": state,
+    }
+    if name == "web_search":
+        query = str(args.get("query") or "")[:500]
+        event.update(
+            {
+                "kind": "search",
+                "title": f"搜索：{query}" if query else "搜索网页",
+                "query": query,
+                "results": [],
+            }
+        )
+    elif name == "scrape_url":
+        url = str(args.get("url") or "")[:2000]
+        event.update(
+            {
+                "kind": "page",
+                "title": "读取网页",
+                "url": url,
+            }
+        )
+    else:
+        event["title"] = f"调用工具：{name}"
+
+    if result is None:
+        return event
+    try:
+        payload = json.loads(result) if isinstance(result, str) else result
+    except (json.JSONDecodeError, TypeError):
+        payload = {"content": str(result or "")}
+    if not isinstance(payload, dict):
+        payload = {"content": str(payload)}
+
+    if payload.get("error"):
+        event["error"] = str(payload["error"])[:500]
+        event["state"] = "error"
+    if name == "web_search":
+        event["source"] = str(payload.get("source") or "")[:100]
+        event["results"] = [
+            {
+                "title": str(item.get("title") or "")[:300],
+                "url": str(item.get("url") or "")[:2000],
+                "snippet": str(item.get("snippet") or "")[:500],
+            }
+            for item in (payload.get("results") or [])[:10]
+            if isinstance(item, dict)
+        ]
+        event["title"] = (
+            f"搜索：{event.get('query') or ''}（{len(event['results'])} 条）"
+        )
+    elif name == "scrape_url":
+        event["url"] = str(payload.get("url") or event.get("url") or "")[:2000]
+        page_title = str(payload.get("title") or "")[:300]
+        event["title"] = f"读取网页：{page_title}" if page_title else "读取网页"
+        body = payload.get("markdown")
+        if body is None:
+            body = payload.get("content")
+        event["excerpt"] = str(body or "")[:2000]
+    return event
+
+
+def _tool_running_events(tool_calls: List[dict]) -> List[dict]:
+    return [_tool_trace_event(tc, state="running") for tc in tool_calls]
 
 
 def _tool_signature(tool_call: dict) -> Tuple[str, str]:
@@ -606,7 +694,18 @@ async def run_agent_stream(
 
     # 立刻推送心跳，避免前端首包前长时间空白
     boot = _chunk(model=use_model, cid=cid)
-    boot["status"] = {"type": "thinking", "message": "思考中…"}
+    boot["status"] = {
+        "type": "thinking",
+        "message": "正在分析问题…",
+        "trace_events": [
+            {
+                "id": "thinking-1",
+                "kind": "thinking",
+                "title": "分析问题并判断是否需要使用工具",
+                "state": "running",
+            }
+        ],
+    }
     yield _sse(boot)
 
     seen_tool_calls = set()
@@ -614,6 +713,21 @@ async def run_agent_stream(
     scrape_calls = 0
     tool_calls_used = 0
     for round_i in range(budget.max_tool_rounds + 1):
+        if round_i > 0:
+            thinking = _chunk(model=use_model, cid=cid)
+            thinking["status"] = {
+                "type": "thinking",
+                "message": f"正在结合第 {round_i} 轮工具结果继续分析…",
+                "trace_events": [
+                    {
+                        "id": f"thinking-{round_i + 1}",
+                        "kind": "thinking",
+                        "title": f"结合第 {round_i} 轮工具结果继续分析",
+                        "state": "running",
+                    }
+                ],
+            }
+            yield _sse(thinking)
         # 上游偶尔会长时间不返回；等待期间持续发 SSE 心跳，并设置整轮硬上限。
         resolve_task = asyncio.create_task(_resolve_round(msgs, use_model))
         started = time.monotonic()
@@ -675,6 +789,14 @@ async def run_agent_stream(
                     "tools": [tc.get("function", {}).get("name", "?") for tc in tool_calls],
                     "round": round_i + 1,
                     "message": "检测到重复工具调用，正在生成最终回答…",
+                    "trace_events": [
+                        {
+                            "id": f"thinking-{round_i + 1}",
+                            "kind": "thinking",
+                            "title": "工具预算已达上限，基于已有资料整理回答",
+                            "state": "done",
+                        }
+                    ],
                 }
                 yield _sse(status)
                 try:
@@ -702,7 +824,20 @@ async def run_agent_stream(
             seen_tool_calls.update(_tool_signature(tc) for tc in tool_calls)
             names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
             status = _chunk(model=use_model, cid=cid)
-            status["status"] = {"type": "tool_start", "tools": names, "round": round_i + 1}
+            status["status"] = {
+                "type": "tool_start",
+                "tools": names,
+                "round": round_i + 1,
+                "trace_events": [
+                    {
+                        "id": f"thinking-{round_i + 1}",
+                        "kind": "thinking",
+                        "title": "已决定调用外部工具",
+                        "state": "done",
+                    },
+                    *_tool_running_events(tool_calls),
+                ],
+            }
             yield _sse(status)
 
             # 工具可能稍慢：执行前再推一条，保持连接活跃
@@ -715,7 +850,7 @@ async def run_agent_stream(
             }
             yield _sse(running)
 
-            await _apply_tool_calls(
+            tool_events = await _apply_tool_calls(
                 msgs,
                 tool_calls,
                 message,
@@ -723,7 +858,12 @@ async def run_agent_stream(
             )
 
             done = _chunk(model=use_model, cid=cid)
-            done["status"] = {"type": "tool_done", "tools": names, "round": round_i + 1}
+            done["status"] = {
+                "type": "tool_done",
+                "tools": names,
+                "round": round_i + 1,
+                "trace_events": tool_events,
+            }
             yield _sse(done)
             continue
 
@@ -738,18 +878,43 @@ async def run_agent_stream(
             )
             if tool_calls:
                 tool_calls_used += len(tool_calls)
-                await _apply_tool_calls(
+                tool_events = await _apply_tool_calls(
                     msgs,
                     tool_calls,
                     message,
                     budget.max_search_results,
                 )
+                tool_done = _chunk(model=use_model, cid=cid)
+                tool_done["status"] = {
+                    "type": "tool_done",
+                    "tools": [
+                        tc.get("function", {}).get("name", "?")
+                        for tc in tool_calls
+                    ],
+                    "round": round_i + 1,
+                    "trace_events": tool_events,
+                }
+                yield _sse(tool_done)
             msgs.append(
                 {
                     "role": "user",
                     "content": "请基于已有工具结果直接给出最终回答，不要再调用工具。",
                 }
             )
+            final_status = _chunk(model=use_model, cid=cid)
+            final_status["status"] = {
+                "type": "thinking",
+                "message": "工具轮数已达上限，正在整理最终回答…",
+                "trace_events": [
+                    {
+                        "id": f"thinking-{round_i + 1}",
+                        "kind": "thinking",
+                        "title": "工具轮数已达上限，整理最终回答",
+                        "state": "done",
+                    }
+                ],
+            }
+            yield _sse(final_status)
             try:
                 async for piece in _call_llm_final_stream(msgs, use_model, cid):
                     yield piece
@@ -784,9 +949,31 @@ async def run_agent_stream(
                 status["status"] = {
                     "type": "thinking",
                     "message": "现有结果不足，正在改写查询继续搜索…",
+                    "trace_events": [
+                        {
+                            "id": f"thinking-{round_i + 1}",
+                            "kind": "thinking",
+                            "title": "现有资料不足，准备改写关键词继续检索",
+                            "state": "done",
+                        }
+                    ],
                 }
                 yield _sse(status)
                 continue
+            final_status = _chunk(model=use_model, cid=cid)
+            final_status["status"] = {
+                "type": "thinking",
+                "message": "回答生成完成",
+                "trace_events": [
+                    {
+                        "id": f"thinking-{round_i + 1}",
+                        "kind": "thinking",
+                        "title": "完成分析并生成回答",
+                        "state": "done",
+                    }
+                ],
+            }
+            yield _sse(final_status)
             step = 24
             for i in range(0, len(final_content), step):
                 yield _sse(_chunk(content=final_content[i : i + step], model=use_model, cid=cid))

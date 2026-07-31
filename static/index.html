@@ -429,6 +429,126 @@
       font-size: 0.85rem;
       padding: 0.4rem 0.8rem;
     }
+    .trace-panel {
+      margin: 0 0 0.7rem;
+      color: var(--muted);
+      font-size: 0.82rem;
+      white-space: normal;
+    }
+    .trace-root {
+      overflow: hidden;
+      border: 1px solid rgba(154, 160, 166, 0.24);
+      border-radius: 9px;
+      background: rgba(10, 12, 16, 0.22);
+    }
+    .trace-root > summary,
+    .trace-event > summary,
+    .trace-result > summary {
+      cursor: pointer;
+      list-style: none;
+    }
+    .trace-root > summary::-webkit-details-marker,
+    .trace-event > summary::-webkit-details-marker,
+    .trace-result > summary::-webkit-details-marker {
+      display: none;
+    }
+    .trace-root > summary {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.48rem 0.62rem;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .trace-root > summary::before {
+      content: "›";
+      color: var(--muted);
+      font-size: 1rem;
+      transition: transform 0.15s ease;
+    }
+    .trace-root[open] > summary::before { transform: rotate(90deg); }
+    .trace-live-dot {
+      width: 7px;
+      height: 7px;
+      flex: 0 0 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 3px rgba(108, 158, 255, 0.14);
+      animation: trace-pulse 1.25s ease-in-out infinite;
+    }
+    @keyframes trace-pulse {
+      50% { opacity: 0.35; transform: scale(0.82); }
+    }
+    .trace-body {
+      padding: 0 0.55rem 0.55rem;
+      border-top: 1px solid rgba(154, 160, 166, 0.16);
+    }
+    .trace-event {
+      margin-top: 0.45rem;
+      border-left: 2px solid rgba(108, 158, 255, 0.36);
+      padding-left: 0.52rem;
+    }
+    .trace-event > summary {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      min-height: 1.7rem;
+      color: var(--text);
+      word-break: break-word;
+    }
+    .trace-event > summary::before {
+      content: "＋";
+      flex: 0 0 1rem;
+      color: var(--muted);
+      font-size: 0.72rem;
+      text-align: center;
+    }
+    .trace-event[open] > summary::before { content: "－"; }
+    .trace-event-state {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 0.72rem;
+      white-space: nowrap;
+    }
+    .trace-event-content {
+      padding: 0.35rem 0 0.2rem 1.4rem;
+    }
+    .trace-query, .trace-excerpt, .trace-error {
+      margin: 0.25rem 0;
+      padding: 0.4rem 0.5rem;
+      border-radius: 6px;
+      background: rgba(154, 160, 166, 0.08);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .trace-error { color: #ff8e8e; }
+    .trace-result {
+      margin-top: 0.35rem;
+      border: 1px solid rgba(154, 160, 166, 0.16);
+      border-radius: 7px;
+      background: rgba(154, 160, 166, 0.045);
+    }
+    .trace-result > summary {
+      padding: 0.38rem 0.5rem;
+      color: var(--text);
+      word-break: break-word;
+    }
+    .trace-result-body {
+      padding: 0.1rem 0.5rem 0.48rem;
+      border-top: 1px solid rgba(154, 160, 166, 0.12);
+    }
+    .trace-result-body a, .trace-event-content > a {
+      display: inline-block;
+      max-width: 100%;
+      margin-top: 0.3rem;
+      color: var(--accent);
+      overflow-wrap: anywhere;
+    }
+    .trace-result-snippet {
+      margin-top: 0.3rem;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
     .composer {
       border-top: 1px solid var(--border);
       background: var(--panel);
@@ -961,6 +1081,7 @@
         appendMsg(item.role, item.content, false, {
           messageIndex: index,
           showActions: true,
+          trace: item.trace || [],
         });
       });
     }
@@ -999,6 +1120,7 @@
       history = item.messages.map((message) => ({
         role: message.role,
         content: message.content || "",
+        trace: Array.isArray(message.trace) ? message.trace : [],
       }));
       renderConversationSelect();
       renderConversation();
@@ -1072,6 +1194,7 @@
       item.messages = history.map((message) => ({
         role: message.role,
         content: message.content,
+        trace: Array.isArray(message.trace) ? message.trace : [],
       }));
       item.updated_at = new Date().toISOString();
       conversations = [item, ...conversations.filter((entry) => entry.id !== item.id)].slice(0, 10);
@@ -1792,6 +1915,163 @@
       container.appendChild(actions);
     }
 
+    function safeHttpUrl(value) {
+      const url = String(value || "");
+      return /^https?:\/\//i.test(url) ? url : "";
+    }
+
+    function renderTracePanel(container, trace, active = false, statusMessage = "") {
+      if (!container) return;
+      const previous = container.querySelector(".trace-panel");
+      const previousRoot = previous && previous.querySelector(".trace-root");
+      const rootWasOpen = previousRoot ? previousRoot.open : active;
+      const openedEvents = new Set();
+      const openedResults = new Set();
+      if (previous) {
+        previous.querySelectorAll(".trace-event[open]").forEach((item) => {
+          openedEvents.add(item.dataset.eventId || "");
+        });
+        previous.querySelectorAll(".trace-result[open]").forEach((item) => {
+          openedResults.add(item.dataset.resultId || "");
+        });
+        previous.remove();
+      }
+
+      let events = Array.isArray(trace) ? trace.slice() : [];
+      if (!events.length && statusMessage) {
+        events = [{
+          id: "current-status",
+          kind: "thinking",
+          title: statusMessage,
+          state: active ? "running" : "done",
+        }];
+      }
+      if (!events.length) return;
+
+      const panel = document.createElement("div");
+      panel.className = "trace-panel";
+      const root = document.createElement("details");
+      root.className = "trace-root";
+      root.open = rootWasOpen;
+      const rootSummary = document.createElement("summary");
+      if (active) {
+        const dot = document.createElement("span");
+        dot.className = "trace-live-dot";
+        dot.setAttribute("aria-hidden", "true");
+        rootSummary.appendChild(dot);
+      }
+      const rootLabel = document.createElement("span");
+      rootLabel.textContent =
+        (active ? "正在思考" : "思考与工具") + " · " + events.length + " 个步骤";
+      rootSummary.appendChild(rootLabel);
+      root.appendChild(rootSummary);
+
+      const body = document.createElement("div");
+      body.className = "trace-body";
+      for (const event of events) {
+        const eventDetails = document.createElement("details");
+        eventDetails.className = "trace-event";
+        eventDetails.dataset.eventId = String(event.id || "");
+        eventDetails.open =
+          openedEvents.has(eventDetails.dataset.eventId) ||
+          (active && event.state === "running");
+        const eventSummary = document.createElement("summary");
+        const title = document.createElement("span");
+        title.textContent = event.title || "处理中";
+        eventSummary.appendChild(title);
+        const state = document.createElement("span");
+        state.className = "trace-event-state";
+        state.textContent =
+          event.state === "running" ? "进行中" :
+          event.state === "error" ? "失败" : "完成";
+        eventSummary.appendChild(state);
+        eventDetails.appendChild(eventSummary);
+
+        const eventContent = document.createElement("div");
+        eventContent.className = "trace-event-content";
+        if (event.query) {
+          const query = document.createElement("div");
+          query.className = "trace-query";
+          query.textContent = "关键词：" + event.query;
+          eventContent.appendChild(query);
+        }
+        if (event.error) {
+          const error = document.createElement("div");
+          error.className = "trace-error";
+          error.textContent = event.error;
+          eventContent.appendChild(error);
+        }
+        if (event.kind === "search") {
+          const results = Array.isArray(event.results) ? event.results : [];
+          if (!results.length && event.state !== "running" && !event.error) {
+            const empty = document.createElement("div");
+            empty.className = "trace-query";
+            empty.textContent = "本轮搜索没有返回可展示的网页。";
+            eventContent.appendChild(empty);
+          }
+          results.forEach((result, index) => {
+            const resultDetails = document.createElement("details");
+            resultDetails.className = "trace-result";
+            resultDetails.dataset.resultId =
+              String(event.id || "search") + "-" + index;
+            resultDetails.open = openedResults.has(resultDetails.dataset.resultId);
+            const resultSummary = document.createElement("summary");
+            resultSummary.textContent =
+              (index + 1) + ". " + (result.title || result.url || "搜索结果");
+            resultDetails.appendChild(resultSummary);
+            const resultBody = document.createElement("div");
+            resultBody.className = "trace-result-body";
+            const url = safeHttpUrl(result.url);
+            if (url) {
+              const link = document.createElement("a");
+              link.href = url;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              link.textContent = "打开网页";
+              resultBody.appendChild(link);
+            }
+            if (result.snippet) {
+              const snippet = document.createElement("div");
+              snippet.className = "trace-result-snippet";
+              snippet.textContent = result.snippet;
+              resultBody.appendChild(snippet);
+            }
+            resultDetails.appendChild(resultBody);
+            eventContent.appendChild(resultDetails);
+          });
+        } else if (event.kind === "page") {
+          const url = safeHttpUrl(event.url);
+          if (url) {
+            const link = document.createElement("a");
+            link.href = url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = "打开读取的网页";
+            eventContent.appendChild(link);
+          }
+          if (event.excerpt) {
+            const excerpt = document.createElement("div");
+            excerpt.className = "trace-excerpt";
+            excerpt.textContent = event.excerpt;
+            eventContent.appendChild(excerpt);
+          }
+        } else if (!event.query && !event.error) {
+          const explanation = document.createElement("div");
+          explanation.className = "trace-query";
+          explanation.textContent =
+            event.state === "running" ? "正在等待模型返回这一阶段的结果…" :
+            "该阶段已经完成。";
+          eventContent.appendChild(explanation);
+        }
+        eventDetails.appendChild(eventContent);
+        body.appendChild(eventDetails);
+      }
+      root.appendChild(body);
+      panel.appendChild(root);
+      const content = container.querySelector(".content");
+      container.insertBefore(panel, content || null);
+    }
+
     function appendMsg(role, content, isStatus, options = {}) {
       removeEmpty();
       const messagesEl = $("messages");
@@ -1810,6 +2090,14 @@
       if (!isStatus && role === "assistant") setAssistantContent(c, content);
       else c.textContent = content;
       div.appendChild(c);
+      if (!isStatus && role === "assistant" && options.trace) {
+        renderTracePanel(
+          div,
+          options.trace,
+          Boolean(options.traceActive),
+          options.statusMessage || "",
+        );
+      }
       if (
         !isStatus &&
         options.showActions !== false &&
@@ -1996,17 +2284,23 @@
         history = (item.messages || []).map((message) => ({
           role: message.role,
           content: message.content || "",
+          trace: Array.isArray(message.trace) ? message.trace : [],
         }));
         renderConversationSelect();
         renderConversation();
       }
-      const contentEl = appendMsg("assistant", job.content || "思考中…");
-      const statusEl = appendMsg(
-        "status",
-        job.status_message || "后台生成中…",
-        true,
+      const contentEl = appendMsg(
+        "assistant",
+        job.content || "",
+        false,
+        {
+          showActions: false,
+          trace: job.trace || [],
+          traceActive: true,
+          statusMessage: job.status_message || "后台生成中…",
+        },
       );
-      return { contentEl, statusEl };
+      return { contentEl };
     }
 
     async function resumeActiveJob() {
@@ -2019,11 +2313,11 @@
         currentJobId = payload.job.id;
         setBusyState(true);
         const ui = showJobInConversation(payload.job);
-        pollJob(payload.job.id, ui.contentEl, ui.statusEl, true);
+        pollJob(payload.job.id, ui.contentEl, true);
       } catch (_) {}
     }
 
-    async function pollJob(jobId, contentEl, statusEl, immediate = false) {
+    async function pollJob(jobId, contentEl, immediate = false) {
       clearJobPoll();
       const poll = async () => {
         if (currentJobId !== jobId) return;
@@ -2036,12 +2330,17 @@
           }
           if (!res.ok) throw new Error("任务状态读取失败");
           const job = await res.json();
-          setAssistantContent(contentEl, job.content || "思考中…");
           const active = ["queued", "running", "stopping"].includes(job.status);
-          if (active) {
-            statusEl.textContent = job.status_message || (
+          setAssistantContent(contentEl, job.content || "");
+          renderTracePanel(
+            contentEl.closest(".msg"),
+            job.trace || [],
+            active,
+            job.status_message || (
               job.status === "stopping" ? "正在停止…" : "后台生成中…"
-            );
+            ),
+          );
+          if (active) {
             jobPollTimer = setTimeout(poll, 900);
             return;
           }
@@ -2049,9 +2348,14 @@
           setAssistantContent(contentEl, finalContent);
           const last = history[history.length - 1];
           if (!last || last.role !== "assistant") {
-            history.push({ role: "assistant", content: finalContent });
+            history.push({
+              role: "assistant",
+              content: finalContent,
+              trace: job.trace || [],
+            });
           } else {
             last.content = finalContent;
+            last.trace = job.trace || [];
           }
           addMessageActions(
             contentEl.closest(".msg"),
@@ -2065,6 +2369,7 @@
             conversation.messages = history.map((message) => ({
               role: message.role,
               content: message.content,
+              trace: Array.isArray(message.trace) ? message.trace : [],
             }));
             conversation.updated_at = new Date().toISOString();
             conversations = [
@@ -2073,8 +2378,6 @@
             ].slice(0, 10);
             renderConversationSelect();
           }
-          const statusRow = statusEl.closest(".msg");
-          if (statusRow) statusRow.remove();
           currentJobId = "";
           clearJobPoll();
           setBusyState(false);
@@ -2105,18 +2408,26 @@
 
       const contentEl = appendMsg(
         "assistant",
-        "思考中…",
+        "",
         false,
-        { showActions: false },
+        {
+          showActions: false,
+          trace: [],
+          traceActive: true,
+          statusMessage: "正在提交后台任务…",
+        },
       );
-      const statusEl = appendMsg("status", "正在提交后台任务…", true);
       try {
         const res = await api("/api/chat/jobs", {
           method: "POST",
           body: JSON.stringify({
             model: $("model-select").value || null,
             reasoning_depth: $("reasoning-depth").value || "deep",
-            messages: history.map((m) => ({ role: m.role, content: m.content })),
+            messages: history.map((m) => ({
+              role: m.role,
+              content: m.content,
+              trace: Array.isArray(m.trace) ? m.trace : [],
+            })),
             conversation_id: currentConversationId,
             title: currentTitle(),
             attachment_ids: attachmentIds,
@@ -2130,12 +2441,16 @@
         const job = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(job.detail || "后台任务提交失败");
         currentJobId = job.id;
-        statusEl.textContent = job.status_message || "后台生成中…";
-        pollJob(job.id, contentEl, statusEl, true);
+        renderTracePanel(
+          contentEl.closest(".msg"),
+          job.trace || [],
+          true,
+          job.status_message || "后台生成中…",
+        );
+        pollJob(job.id, contentEl, true);
         return true;
       } catch (e) {
-        const row = statusEl.closest(".msg");
-        if (row) row.remove();
+        renderTracePanel(contentEl.closest(".msg"), [], false, "");
         setAssistantContent(contentEl, "请求失败：" + e.message);
         setBusyState(false);
         return false;

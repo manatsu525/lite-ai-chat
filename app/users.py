@@ -76,6 +76,7 @@ def init_db() -> None:
                     status TEXT NOT NULL,
                     content TEXT NOT NULL DEFAULT '',
                     status_message TEXT NOT NULL DEFAULT '',
+                    trace_json TEXT NOT NULL DEFAULT '[]',
                     error TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -84,6 +85,14 @@ def init_db() -> None:
                 )
                 """
             )
+            job_columns = {
+                row["name"]
+                for row in c.execute("PRAGMA table_info(chat_jobs)").fetchall()
+            }
+            if "trace_json" not in job_columns:
+                c.execute(
+                    "ALTER TABLE chat_jobs ADD COLUMN trace_json TEXT NOT NULL DEFAULT '[]'"
+                )
             c.execute(
                 """
                 CREATE TABLE IF NOT EXISTS attachments (
@@ -714,19 +723,37 @@ def update_chat_job(
     content: str = "",
     status_message: str = "",
     error: str = "",
+    trace: Optional[list] = None,
 ) -> None:
+    trace_json = (
+        json.dumps(trace, ensure_ascii=False)
+        if trace is not None
+        else None
+    )
     with _lock:
         with _conn() as c:
             c.execute(
                 """
                 UPDATE chat_jobs
                 SET status = ?, content = ?, status_message = ?, error = ?,
+                    trace_json = COALESCE(?, trace_json),
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE id = ?
                 """,
-                (status, content, status_message, error, job_id),
+                (status, content, status_message, error, trace_json, job_id),
             )
             c.commit()
+
+
+def _chat_job_dict(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    raw = item.pop("trace_json", "[]")
+    try:
+        trace = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        trace = []
+    item["trace"] = trace if isinstance(trace, list) else []
+    return item
 
 
 def get_chat_job(user_id: int, job_id: str) -> Optional[dict]:
@@ -734,13 +761,13 @@ def get_chat_job(user_id: int, job_id: str) -> Optional[dict]:
         row = c.execute(
             """
             SELECT id, conversation_id, model, status, content,
-                   status_message, error, created_at, updated_at
+                   status_message, trace_json, error, created_at, updated_at
             FROM chat_jobs
             WHERE user_id = ? AND id = ?
             """,
             (user_id, job_id),
         ).fetchone()
-    return dict(row) if row else None
+    return _chat_job_dict(row) if row else None
 
 
 def get_active_chat_job(user_id: int) -> Optional[dict]:
@@ -748,7 +775,7 @@ def get_active_chat_job(user_id: int) -> Optional[dict]:
         row = c.execute(
             """
             SELECT id, conversation_id, model, status, content,
-                   status_message, error, created_at, updated_at
+                   status_message, trace_json, error, created_at, updated_at
             FROM chat_jobs
             WHERE user_id = ? AND status IN ('queued', 'running', 'stopping')
             ORDER BY created_at DESC
@@ -756,4 +783,4 @@ def get_active_chat_job(user_id: int) -> Optional[dict]:
             """,
             (user_id,),
         ).fetchone()
-    return dict(row) if row else None
+    return _chat_job_dict(row) if row else None

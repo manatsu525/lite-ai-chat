@@ -141,6 +141,7 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[Any] = None
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
+    trace: Optional[List[dict]] = None
 
 
 class ChatRequest(BaseModel):
@@ -643,6 +644,9 @@ def save_conversation(
         if total_chars > 1_000_000:
             raise HTTPException(status_code=413, detail="对话内容过大")
         messages.append({"role": message.role, "content": content})
+        trace = jobs.clean_trace(message.trace)
+        if trace and message.role == "assistant":
+            messages[-1]["trace"] = trace
     title = body.title.strip()[:100] or "新对话"
     users.save_conversation(user["id"], conversation_id, title, messages)
     return {"ok": True}
@@ -673,7 +677,11 @@ async def create_chat_job(body: ChatJobBody, user: dict = Depends(require_user))
         total_chars += len(content)
         if total_chars > 1_000_000:
             raise HTTPException(status_code=413, detail="对话内容过大")
-        clean.append({"role": message.role, "content": content})
+        item = {"role": message.role, "content": content}
+        trace = jobs.clean_trace(message.trace)
+        if trace and message.role == "assistant":
+            item["trace"] = trace
+        clean.append(item)
     if not clean:
         raise HTTPException(status_code=400, detail="messages 不能为空")
     attachment_ids = list(dict.fromkeys(body.attachment_ids))
@@ -734,6 +742,7 @@ async def chat_completions(body: ChatRequest, user: dict = Depends(require_user)
     clean = []
     for m in messages:
         if m.get("role") in ("system", "user", "assistant", "tool"):
+            m.pop("trace", None)
             clean.append(m)
     if not clean:
         raise HTTPException(status_code=400, detail="messages 不能为空")

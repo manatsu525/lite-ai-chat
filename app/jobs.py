@@ -3,7 +3,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import attachments, users
 from .agent import run_agent_stream
@@ -11,6 +11,62 @@ from .agent import run_agent_stream
 _tasks: Dict[str, asyncio.Task] = {}
 _start_lock = asyncio.Lock()
 _attachment_job_lock = asyncio.Lock()
+
+
+def clean_trace(value: Any) -> List[dict]:
+    """限制过程记录体积，避免轮询和 SQLite 被网页正文拖大。"""
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for raw in value[-40:]:
+        if not isinstance(raw, dict):
+            continue
+        item = {
+            "id": str(raw.get("id") or uuid.uuid4().hex[:12])[:100],
+            "kind": str(raw.get("kind") or "thinking")[:30],
+            "title": str(raw.get("title") or "处理中")[:300],
+            "state": str(raw.get("state") or "done")[:20],
+        }
+        for key, limit in (
+            ("tool", 80),
+            ("query", 500),
+            ("url", 2000),
+            ("source", 100),
+            ("excerpt", 2000),
+            ("error", 500),
+        ):
+            if raw.get(key):
+                item[key] = str(raw[key])[:limit]
+        results = []
+        for result in (raw.get("results") or [])[:10]:
+            if not isinstance(result, dict):
+                continue
+            results.append(
+                {
+                    "title": str(result.get("title") or "")[:300],
+                    "url": str(result.get("url") or "")[:2000],
+                    "snippet": str(result.get("snippet") or "")[:500],
+                }
+            )
+        if results or "results" in raw:
+            item["results"] = results
+        cleaned.append(item)
+    return cleaned
+
+
+def _merge_trace_events(trace: List[dict], events: Any) -> List[dict]:
+    incoming = clean_trace(events)
+    if not incoming:
+        return trace
+    positions = {item.get("id"): index for index, item in enumerate(trace)}
+    for event in incoming:
+        event_id = event.get("id")
+        if event_id in positions:
+            trace[positions[event_id]] = event
+        else:
+            positions[event_id] = len(trace)
+            trace.append(event)
+    return clean_trace(trace)
 
 
 def _status_label(status: dict) -> str:
@@ -35,14 +91,23 @@ def _persist_answer(
     title: str,
     messages: List[dict],
     content: str,
+    trace: Optional[List[dict]] = None,
 ) -> None:
-    conversation_messages = [
-        {"role": item["role"], "content": item.get("content") or ""}
-        for item in messages
-        if item.get("role") in ("user", "assistant")
-    ]
+    conversation_messages = []
+    for item in messages:
+        if item.get("role") not in ("user", "assistant"):
+            continue
+        message = {"role": item["role"], "content": item.get("content") or ""}
+        old_trace = clean_trace(item.get("trace"))
+        if old_trace and item.get("role") == "assistant":
+            message["trace"] = old_trace
+        conversation_messages.append(message)
     if content:
-        conversation_messages.append({"role": "assistant", "content": content})
+        answer = {"role": "assistant", "content": content}
+        current_trace = clean_trace(trace)
+        if current_trace:
+            answer["trace"] = current_trace
+        conversation_messages.append(answer)
     users.save_conversation(
         user_id,
         conversation_id,
@@ -62,12 +127,20 @@ async def _run_job(
     reasoning_depth: str,
 ) -> None:
     content = ""
+    trace: List[dict] = []
     status_message = "思考中…"
     last_persist = 0.0
     attachment_lock_acquired = False
-    users.update_chat_job(job_id, "running", content, status_message)
+    users.update_chat_job(job_id, "running", content, status_message, trace=trace)
     try:
-        model_messages = messages
+        model_messages = [
+            {
+                "role": item["role"],
+                "content": item.get("content") or "",
+            }
+            for item in messages
+            if item.get("role") in ("user", "assistant")
+        ]
         if attachment_records:
             status_message = "正在等待附件任务…"
             users.update_chat_job(job_id, "running", content, status_message)
@@ -77,7 +150,7 @@ async def _run_job(
             users.update_chat_job(job_id, "running", content, status_message)
             model_messages = await asyncio.to_thread(
                 attachments.build_model_messages,
-                messages,
+                model_messages,
                 attachment_records,
             )
         async for frame in run_agent_stream(
@@ -85,6 +158,7 @@ async def _run_job(
             model=model,
             reasoning_depth=reasoning_depth,
         ):
+            force_persist = False
             for line in frame.splitlines():
                 if not line.startswith("data: "):
                     continue
@@ -96,17 +170,25 @@ async def _run_job(
                 except json.JSONDecodeError:
                     continue
                 if payload.get("status"):
-                    status_message = _status_label(payload["status"])
+                    status = payload["status"]
+                    status_message = _status_label(status)
+                    trace_events = status.get("trace_events")
+                    trace = _merge_trace_events(
+                        trace,
+                        trace_events,
+                    )
+                    force_persist = force_persist or bool(trace_events)
                 for choice in payload.get("choices") or []:
                     content += (choice.get("delta") or {}).get("content") or ""
 
             now = time.monotonic()
-            if now - last_persist >= 0.75:
+            if force_persist or now - last_persist >= 0.75:
                 users.update_chat_job(
                     job_id,
                     "running",
                     content,
                     status_message,
+                    trace=trace,
                 )
                 last_persist = now
 
@@ -118,8 +200,9 @@ async def _run_job(
             title,
             messages,
             content,
+            trace,
         )
-        users.update_chat_job(job_id, "completed", content, "")
+        users.update_chat_job(job_id, "completed", content, "", trace=trace)
     except asyncio.CancelledError:
         stopped_content = content
         if stopped_content:
@@ -132,8 +215,9 @@ async def _run_job(
             title,
             messages,
             stopped_content,
+            trace,
         )
-        users.update_chat_job(job_id, "stopped", stopped_content, "")
+        users.update_chat_job(job_id, "stopped", stopped_content, "", trace=trace)
     except Exception as exc:
         error = f"{type(exc).__name__}: {str(exc)[:500]}"
         failed_content = content or f"[后台生成失败] {error}"
@@ -143,6 +227,7 @@ async def _run_job(
             title,
             messages,
             failed_content,
+            trace,
         )
         users.update_chat_job(
             job_id,
@@ -150,6 +235,7 @@ async def _run_job(
             failed_content,
             "",
             error,
+            trace,
         )
     finally:
         if attachment_lock_acquired:
@@ -200,6 +286,7 @@ async def start_job(
             "status": "queued",
             "content": "",
             "status_message": "已提交，等待运行…",
+            "trace": [],
             "error": "",
         }
 
