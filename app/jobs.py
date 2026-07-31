@@ -32,6 +32,7 @@ def clean_trace(value: Any) -> List[dict]:
             ("query", 500),
             ("url", 2000),
             ("source", 100),
+            ("extraction", 100),
             ("excerpt", 2000),
             ("error", 500),
             ("warning", 500),

@@ -5,3 +5,5 @@ PyJWT==2.10.1
 bcrypt==4.2.1
 pydantic==2.10.3
 Pillow==11.3.0
+curl_cffi==0.13.0
+readability-lxml==0.8.4.1

@@ -20,7 +20,7 @@ from .tools import TOOLS_SCHEMA, execute_tool
 
 logger = logging.getLogger("lite-ai-chat.agent")
 
-_TOOL_EXEC_TIMEOUT = 15.0
+_TOOL_EXEC_TIMEOUT = 30.0
 _WEB_SEARCH_TIMEOUT = 60.0
 _HEARTBEAT_INTERVAL = 5.0
 _MAX_EXTERNAL_SEARCHES = 5
@@ -665,6 +665,8 @@ def _tool_trace_event(
         )
     elif name == "scrape_url":
         event["url"] = str(payload.get("url") or event.get("url") or "")[:2000]
+        event["source"] = str(payload.get("source") or "")[:100]
+        event["extraction"] = str(payload.get("extraction") or "")[:100]
         page_title = str(payload.get("title") or "")[:300]
         event["title"] = f"读取网页：{page_title}" if page_title else "读取网页"
         body = payload.get("markdown")

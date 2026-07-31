@@ -2051,6 +2051,14 @@
             eventContent.appendChild(resultDetails);
           });
         } else if (event.kind === "page") {
+          if (event.source || event.extraction) {
+            const method = document.createElement("div");
+            method.className = "trace-query";
+            method.textContent =
+              "抓取方式：" + (event.source || "未知") +
+              (event.extraction ? " · 正文提取：" + event.extraction : "");
+            eventContent.appendChild(method);
+          }
           const url = safeHttpUrl(event.url);
           if (url) {
             const link = document.createElement("a");

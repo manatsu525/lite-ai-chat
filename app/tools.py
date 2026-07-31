@@ -25,6 +25,9 @@ _CONNECT_TIMEOUT = 3.0
 _SCRAPER_EXT_TIMEOUT = 3.0
 _MAX_SEARCH_SNIPPET_CHARS = 500
 _MAX_SCRAPE_CHARS = 8000
+_MAX_HTML_BYTES = 2_500_000
+_READABILITY_MAX_CHARS = 1_000_000
+_READABILITY_MAX_TAGS = 8_000
 _UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -102,7 +105,18 @@ TOOLS_SCHEMA = [
 class _HTMLToText(HTMLParser):
     """极简 HTML → 近似 markdown，零额外依赖。"""
 
-    SKIP = {"script", "style", "noscript", "svg", "nav", "footer", "header"}
+    SKIP = {
+        "script",
+        "style",
+        "noscript",
+        "svg",
+        "nav",
+        "footer",
+        "header",
+        "aside",
+        "form",
+        "button",
+    }
 
     def __init__(self):
         super().__init__()
@@ -163,6 +177,116 @@ class _HTMLToText(HTMLParser):
         return raw.strip()
 
 
+_BOILERPLATE_RE = re.compile(
+    r"^(登录|注册|打开APP|下载APP|返回首页|首页|更多|展开全文|"
+    r"相关推荐|热门推荐|猜你喜欢|免责声明|版权声明|扫码|关注我们|"
+    r"广告|推广|上一篇|下一篇)(?:\s|$|[:：])",
+    re.I,
+)
+_ERROR_PAGE_RE = re.compile(
+    r"(404|页面不存在|访问验证|安全验证|请输入验证码|访问过于频繁|"
+    r"access denied|just a moment|captcha)",
+    re.I,
+)
+
+
+def _clean_extracted_text(text: str) -> str:
+    """删除正文提取后残留的短导航、广告和重复行。"""
+    cleaned = []
+    seen = set()
+    for raw_line in str(text or "").splitlines():
+        line = re.sub(r"[ \t]+", " ", raw_line).strip()
+        if not line:
+            if cleaned and cleaned[-1] != "":
+                cleaned.append("")
+            continue
+        plain = re.sub(r"\[([^\]]*)\]\([^)]+\)", r"\1", line)
+        link_count = len(re.findall(r"\[[^\]]*\]\([^)]+\)", line))
+        if link_count >= 3 and len(plain) < 240:
+            continue
+        if len(plain) <= 100 and _BOILERPLATE_RE.search(plain):
+            continue
+        signature = re.sub(r"\s+", "", plain).lower()
+        if len(signature) <= 240 and signature in seen:
+            continue
+        seen.add(signature)
+        cleaned.append(line)
+    text = "\n".join(cleaned).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
+def _html_to_main_markdown(html: str) -> Tuple[str, str, str]:
+    """Readability 先选正文节点，再转为轻量 Markdown。"""
+    raw_html = str(html or "")
+    title_m = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.I | re.S)
+    fallback_title = _strip_tags(title_m.group(1)) if title_m else ""
+    # 先用不构建 DOM 的方式删除最容易膨胀的区域，既减少导航广告，也避免
+    # lxml 面对数千节点时瞬间占满小内存 VPS。
+    selected_html = re.sub(
+        r"<(script|style|noscript|svg|nav|header|footer|aside|form)\b[^>]*>"
+        r".*?</\1\s*>",
+        "",
+        raw_html,
+        flags=re.I | re.S,
+    )
+    selected_html = re.sub(r"<!--.*?-->", "", selected_html, flags=re.S)
+    title = fallback_title
+    extraction = "fallback"
+    try:
+        from readability import Document
+
+        if (
+            len(selected_html) > _READABILITY_MAX_CHARS
+            or selected_html.count("<") > _READABILITY_MAX_TAGS
+        ):
+            raise RuntimeError("HTML 过大，使用低内存流式正文提取")
+        document = Document(selected_html)
+        summary = document.summary(html_partial=True)
+        if summary and len(_strip_tags(summary)) >= 20:
+            selected_html = summary
+            title = _strip_tags(document.short_title()) or fallback_title
+            extraction = "readability"
+    except Exception as exc:
+        logger.info("readability fallback: %s", type(exc).__name__)
+
+    parser = _HTMLToText()
+    try:
+        parser.feed(selected_html)
+        text = parser.get_text()
+    except Exception:
+        text = _strip_tags(selected_html)
+    text = _clean_extracted_text(text)
+
+    if _ERROR_PAGE_RE.search(title or "") and len(text) < 1000:
+        raise RuntimeError(f"页面返回验证或错误页：{title or 'unknown'}")
+    normalized_text = re.sub(r"\s+", "", text)
+    normalized_title = re.sub(r"\s+", "", title)
+    if (
+        not text
+        or len(text) < 80
+        or (
+            normalized_title
+            and normalized_text.strip("#") == normalized_title
+        )
+    ):
+        raise RuntimeError("网页 HTML 只有标题/导航，正文可能需要 JavaScript")
+    if len(text) > _MAX_SCRAPE_CHARS:
+        text = text[:_MAX_SCRAPE_CHARS] + "\n\n...[正文内容已截断]"
+    return title[:300], text, extraction
+
+
+def _decode_html(content: bytes, encoding: Optional[str] = None) -> str:
+    for candidate in (encoding, "utf-8", "gb18030"):
+        if not candidate:
+            continue
+        try:
+            return content.decode(candidate)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
 def _strip_tags(s: str) -> str:
     s = unescape(re.sub(r"<[^>]+>", "", s or ""))
     return re.sub(r"\s+", " ", s).strip()
@@ -177,6 +301,13 @@ def _unwrap_ddg_url(href: str) -> str:
         if qs.get("uddg"):
             return unquote(qs["uddg"][0])
     return href
+
+
+def _url_host_for_log(value: str) -> str:
+    try:
+        return (urlparse(value).hostname or "")[:200]
+    except ValueError:
+        return ""
 
 
 # ---------- 各搜索源（均为模型之外的独立服务） ----------
@@ -669,34 +800,157 @@ async def web_search(query: str, num_results: int = None) -> str:
 # ---------- 抓取 ----------
 
 
+class _ScrapeStatusError(RuntimeError):
+    def __init__(self, status_code: int):
+        self.status_code = int(status_code)
+        super().__init__(f"HTTP {self.status_code}")
+
+
+def _scrape_document_result(
+    url: str,
+    html: str,
+    source: str,
+    input_truncated: bool = False,
+) -> str:
+    title, text, extraction = _html_to_main_markdown(html)
+    return json.dumps(
+        {
+            "url": url,
+            "title": title,
+            "markdown": text,
+            "source": source,
+            "extraction": extraction,
+            "input_truncated": bool(input_truncated),
+        },
+        ensure_ascii=False,
+    )
+
+
 async def _builtin_scrape(url: str) -> str:
     headers = {
-        "User-Agent": "LiteAIChat/1.0 (+local-scraper)",
+        "User-Agent": _UA,
         "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
     }
     async with httpx.AsyncClient(timeout=_timeout(10), follow_redirects=True) as client:
-        r = await client.get(url, headers=headers)
-        r.raise_for_status()
-        html = r.text
-    title_m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
-    title = re.sub(r"\s+", " ", title_m.group(1)).strip() if title_m else ""
-    parser = _HTMLToText()
-    try:
-        parser.feed(html)
-        text = parser.get_text()
-    except Exception:
-        text = re.sub(r"<[^>]+>", " ", html)
-        text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > _MAX_SCRAPE_CHARS:
-        text = text[:_MAX_SCRAPE_CHARS] + "\n\n...[内容已截断]"
+        async with client.stream("GET", url, headers=headers) as response:
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "").lower()
+            if content_type and not any(
+                kind in content_type
+                for kind in ("text/", "html", "xhtml", "xml")
+            ):
+                raise RuntimeError(f"不支持的网页类型：{content_type[:100]}")
+            body = bytearray()
+            input_truncated = False
+            async for chunk in response.aiter_bytes():
+                remaining = _MAX_HTML_BYTES - len(body)
+                if remaining <= 0:
+                    input_truncated = True
+                    break
+                body.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    input_truncated = True
+                    break
+            html = _decode_html(bytes(body), response.encoding)
+    return await asyncio.to_thread(
+        _scrape_document_result,
+        url,
+        html,
+        "httpx",
+        input_truncated,
+    )
+
+
+async def _curl_cffi_scrape(url: str) -> str:
+    """失败后用浏览器 TLS/HTTP2 指纹重试，不执行 JavaScript。"""
+    from curl_cffi.requests import AsyncSession
+
+    chunks = []
+    received = 0
+    input_truncated = False
+
+    def receive(chunk: bytes) -> int:
+        nonlocal received, input_truncated
+        remaining = _MAX_HTML_BYTES - received
+        if remaining > 0:
+            kept = chunk[:remaining]
+            chunks.append(kept)
+            received += len(kept)
+        if len(chunk) > max(remaining, 0):
+            input_truncated = True
+        return len(chunk)
+
+    async with AsyncSession(
+        impersonate="chrome",
+        timeout=12,
+    ) as session:
+        response = await session.get(
+            url,
+            allow_redirects=True,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+            },
+            content_callback=receive,
+        )
+    if response.status_code >= 400:
+        raise _ScrapeStatusError(response.status_code)
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if content_type and not any(
+        kind in content_type
+        for kind in ("text/", "html", "xhtml", "xml")
+    ):
+        raise RuntimeError(f"不支持的网页类型：{content_type[:100]}")
+    html = _decode_html(
+        b"".join(chunks),
+        getattr(response, "encoding", None),
+    )
+    return await asyncio.to_thread(
+        _scrape_document_result,
+        url,
+        html,
+        "curl_cffi",
+        input_truncated,
+    )
+
+
+def _scrape_failure(url: str, error: Exception) -> str:
+    if isinstance(error, _ScrapeStatusError):
+        status_code = error.status_code
+    elif isinstance(error, httpx.HTTPStatusError):
+        status_code = error.response.status_code
+    else:
+        status_code = None
+    if status_code in (401, 403, 407, 429, 451):
+        return json.dumps(
+            {
+                "url": url,
+                "error": f"源站返回 HTTP {status_code}，拒绝自动抓取",
+                "status_code": status_code,
+                "blocked": True,
+            },
+            ensure_ascii=False,
+        )
+    if status_code is not None:
+        return json.dumps(
+            {
+                "url": url,
+                "error": f"网页请求失败（HTTP {status_code}）",
+                "status_code": status_code,
+            },
+            ensure_ascii=False,
+        )
+    message = str(error).strip()
+    detail = f"{type(error).__name__}: {message}" if message else type(error).__name__
     return json.dumps(
-        {"url": url, "title": title, "markdown": text, "source": "builtin"},
+        {"url": url, "error": f"抓取失败: {detail[:500]}"},
         ensure_ascii=False,
     )
 
 
 async def scrape_url(url: str) -> str:
-    """优先外部 Firecrawl；短超时失败后本地回退。"""
+    """Firecrawl → httpx → curl_cffi；所有正文先做主内容提取。"""
     if not url or not url.startswith(("http://", "https://")):
         return json.dumps({"error": "无效 URL，需以 http:// 或 https:// 开头"}, ensure_ascii=False)
 
@@ -735,28 +989,21 @@ async def scrape_url(url: str) -> str:
 
     try:
         return await _builtin_scrape(url)
-    except httpx.HTTPStatusError as e:
-        status_code = e.response.status_code
-        if status_code in (401, 403, 407, 429, 451):
-            return json.dumps(
-                {
-                    "url": url,
-                    "error": f"源站返回 HTTP {status_code}，拒绝自动抓取",
-                    "status_code": status_code,
-                    "blocked": True,
-                },
-                ensure_ascii=False,
-            )
-        return json.dumps(
-            {
-                "url": url,
-                "error": f"网页请求失败（HTTP {status_code}）",
-                "status_code": status_code,
-            },
-            ensure_ascii=False,
+    except Exception as primary_error:
+        logger.info(
+            "httpx scrape failed for %s: %s",
+            _url_host_for_log(url),
+            type(primary_error).__name__,
         )
-    except Exception as e:
-        return json.dumps({"error": f"抓取失败: {type(e).__name__}: {e}"}, ensure_ascii=False)
+    try:
+        return await _curl_cffi_scrape(url)
+    except Exception as curl_error:
+        logger.info(
+            "curl_cffi scrape failed for %s: %s",
+            _url_host_for_log(url),
+            type(curl_error).__name__,
+        )
+        return _scrape_failure(url, curl_error or primary_error)
 
 
 async def execute_tool(name: str, arguments: Any) -> str:
