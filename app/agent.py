@@ -30,6 +30,8 @@ _RECENT_CONVERSATION_ROUNDS = 10
 _OLDER_HISTORY_SUMMARY_CHARS = 6000
 _SCRAPE_AVOID_DOMAINS = (
     "douyin.com",
+    "smzdm.com",
+    "tieba.baidu.com",
     "toutiao.com",
     "xiaohongshu.com",
     "zhihu.com",
@@ -83,7 +85,7 @@ def _system_prompt(budget: AgentBudget) -> str:
 1. 需要实时或外部信息时，调用 web_search。它是独立于当前模型的外部搜索服务。
 2. 每轮搜索后先判断结果是否真正回答了问题；若无关、不完整、互相冲突或缺少权威来源，不要仓促回答，要换一个明显不同且更精确的查询继续搜索。
 3. 改写查询时可加入准确年份、关键实体、官方域名或 site: 限定。最多进行 {budget.max_searches} 次 web_search，每次最多返回 {budget.max_search_results} 条结果；不要重复完全相同的查询。
-4. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。优先政府、学校、机构官网等一手来源；同等信息下避开知乎、百度搜索、抖音、头条、小红书等已经实测会要求验证、拒绝 VPS 访问或只返回 JavaScript 空壳的站点，改选搜索结果中可公开读取的来源。百度百科等能够正常读取的百度子站不在此限制内。若结果标记 partial 或 search_index_fallback，表示源站阻止抓取、当前只有搜索索引摘要；不得把它当作网页全文，也不能推断摘要未提及的细节。{tool_limit}
+4. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。优先政府、学校、机构官网等一手来源；同等信息下避开知乎、百度搜索、百度贴吧、抖音、头条、小红书、什么值得买等已经实测会要求验证、拒绝 VPS 访问或只返回 JavaScript 空壳的站点，改选搜索结果中可公开读取的来源。百度百科、百度文库等未被固定屏蔽的百度子站仍应正常尝试读取。若结果标记 partial 或 search_index_fallback，表示源站阻止抓取、当前只有搜索索引摘要；不得把它当作网页全文，也不能推断摘要未提及的细节。{tool_limit}
 5. 回答具体日期时，正文必须明确说明该日期对应用户所问事件；网页的“发布时间/更新时间”不能当成开学、放假等事件日期。若抓到的只是列表页、图片页或正文没有答案，应继续换查询搜索，不能猜测。
 6. 不要编造链接或事实；最终回答必须基于工具结果，并附上实际来源链接。达到搜索上限仍无可靠答案时，要如实说明未核实到。
 7. 使用与用户相同的语言回答。
