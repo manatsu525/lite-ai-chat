@@ -1972,9 +1972,7 @@
         const eventDetails = document.createElement("details");
         eventDetails.className = "trace-event";
         eventDetails.dataset.eventId = String(event.id || "");
-        eventDetails.open =
-          openedEvents.has(eventDetails.dataset.eventId) ||
-          (active && event.state === "running");
+        eventDetails.open = openedEvents.has(eventDetails.dataset.eventId);
         const eventSummary = document.createElement("summary");
         const title = document.createElement("span");
         title.textContent = event.title || "处理中";
