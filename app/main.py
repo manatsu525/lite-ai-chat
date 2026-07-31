@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 from typing import Any, List, Optional
 from urllib.parse import urlparse
+import uuid
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -19,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import jobs, users
+from . import attachments, jobs, users
 from .agent import run_agent_stream, run_agent_sync
 from .auth import create_token, require_admin, require_user
 from .config import (
@@ -43,6 +44,9 @@ users.init_db()
 app = FastAPI(title="Lite AI Chat", version="1.0.0", docs_url=None, redoc_url=None)
 logger = logging.getLogger("lite-ai-chat")
 _cleanup_task: Optional[asyncio.Task] = None
+_attachment_cleanup_task: Optional[asyncio.Task] = None
+_attachment_upload_locks = {}
+_attachment_processing_lock = asyncio.Lock()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -88,20 +92,41 @@ async def _periodic_storage_cleanup() -> None:
         await asyncio.sleep(DATA_CLEANUP_INTERVAL)
 
 
+async def _periodic_attachment_cleanup() -> None:
+    while True:
+        try:
+            expired = await asyncio.to_thread(users.cleanup_expired_attachments, 24)
+            await asyncio.to_thread(attachments.delete_files, expired)
+            active_paths = await asyncio.to_thread(users.all_attachment_paths)
+            await asyncio.to_thread(
+                attachments.cleanup_orphan_files,
+                active_paths,
+                24,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("过期附件清理失败")
+        await asyncio.sleep(6 * 60 * 60)
+
+
 @app.on_event("startup")
 async def start_storage_cleanup() -> None:
-    global _cleanup_task
+    global _cleanup_task, _attachment_cleanup_task
     _cleanup_task = asyncio.create_task(_periodic_storage_cleanup())
+    _attachment_cleanup_task = asyncio.create_task(_periodic_attachment_cleanup())
 
 
 @app.on_event("shutdown")
 async def stop_storage_cleanup() -> None:
-    global _cleanup_task
-    if _cleanup_task:
-        _cleanup_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await _cleanup_task
+    global _cleanup_task, _attachment_cleanup_task
+    for task in (_cleanup_task, _attachment_cleanup_task):
+        if task:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
     _cleanup_task = None
+    _attachment_cleanup_task = None
 
 
 # ---------- 请求体 ----------
@@ -132,6 +157,7 @@ class ChatJobBody(BaseModel):
     messages: List[ChatMessage] = Field(min_length=1, max_length=100)
     conversation_id: str = Field(min_length=8, max_length=64)
     title: str = Field(default="新对话", max_length=100)
+    attachment_ids: List[str] = Field(default_factory=list, max_length=10)
 
 
 class ProviderBody(BaseModel):
@@ -362,10 +388,130 @@ async def admin_delete_user(
     if user_id == admin["id"]:
         raise HTTPException(status_code=400, detail="不能删除当前管理员账号")
     await jobs.stop_active_job_for_user(user_id)
+    user_attachments = users.get_all_attachments_for_user(user_id)
     try:
         users.delete_managed_user(user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    attachments.delete_files(user_attachments)
+    return {"ok": True}
+
+
+# ---------- 附件（原始文件流式落盘，避免进入 Python 大对象） ----------
+def _public_attachment(record: dict) -> dict:
+    return {
+        "id": record["id"],
+        "name": record["original_name"],
+        "kind": record["kind"],
+        "size": record["original_size"],
+        "processed_size": record["processed_size"],
+    }
+
+
+@app.get("/api/attachments")
+def list_pending_attachments(
+    conversation_id: str,
+    user: dict = Depends(require_user),
+):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{8,64}", conversation_id):
+        raise HTTPException(status_code=400, detail="无效的对话标识")
+    records = users.get_attachments(user["id"], conversation_id)
+    return {
+        "data": [_public_attachment(record) for record in records],
+        "max_files": attachments.MAX_ATTACHMENTS,
+        "max_total_bytes": attachments.MAX_UPLOAD_BYTES,
+    }
+
+
+@app.post("/api/attachments")
+async def upload_attachment(
+    request: Request,
+    conversation_id: str,
+    filename: str,
+    user: dict = Depends(require_user),
+):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{8,64}", conversation_id):
+        raise HTTPException(status_code=400, detail="无效的对话标识")
+    name = attachments.safe_filename(filename)
+    content_length = request.headers.get("content-length", "")
+    try:
+        declared_size = int(content_length)
+    except (TypeError, ValueError):
+        declared_size = 0
+    if declared_size > attachments.MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="单个文件不能超过 50MB")
+
+    lock = _attachment_upload_locks.setdefault(user["id"], asyncio.Lock())
+    async with lock:
+        usage = users.attachment_usage(user["id"], conversation_id)
+        if usage["count"] >= attachments.MAX_ATTACHMENTS:
+            raise HTTPException(status_code=413, detail="一次最多上传 10 个附件")
+        remaining = attachments.MAX_UPLOAD_BYTES - usage["bytes"]
+        if remaining <= 0 or (declared_size and declared_size > remaining):
+            raise HTTPException(status_code=413, detail="一次消息的附件总量不能超过 50MB")
+
+        attachment_id = uuid.uuid4().hex
+        incoming = attachments.attachment_path(
+            user["id"], f".incoming-{attachment_id}", ".upload"
+        )
+        written = 0
+        processed_record = None
+        try:
+            with incoming.open("wb") as stream:
+                async for chunk in request.stream():
+                    written += len(chunk)
+                    if written > remaining or written > attachments.MAX_UPLOAD_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail="一次消息的附件总量不能超过 50MB",
+                        )
+                    stream.write(chunk)
+            if written <= 0:
+                raise HTTPException(status_code=400, detail="附件为空")
+            async with _attachment_processing_lock:
+                result = await asyncio.to_thread(
+                    attachments.process_upload,
+                    incoming,
+                    user["id"],
+                    attachment_id,
+                    name,
+                    request.headers.get("content-type", "application/octet-stream"),
+                )
+            processed_record = {"stored_path": str(result["stored_path"])}
+            record = users.create_attachment(
+                attachment_id,
+                user["id"],
+                conversation_id,
+                name,
+                str(result["kind"]),
+                str(result["media_type"]),
+                str(result["stored_path"]),
+                written,
+                int(result["processed_size"]),
+            )
+            return _public_attachment(record)
+        except attachments.AttachmentError as exc:
+            raise HTTPException(status_code=415, detail=str(exc))
+        except HTTPException:
+            raise
+        except Exception:
+            if processed_record:
+                attachments.delete_files([processed_record])
+            logger.exception("附件保存失败")
+            raise HTTPException(status_code=500, detail="附件保存失败")
+        finally:
+            incoming.unlink(missing_ok=True)
+
+
+@app.delete("/api/attachments/{attachment_id}")
+def delete_attachment(
+    attachment_id: str,
+    user: dict = Depends(require_user),
+):
+    if not re.fullmatch(r"[a-f0-9]{32}", attachment_id):
+        raise HTTPException(status_code=400, detail="无效的附件标识")
+    records = users.delete_attachments(user["id"], [attachment_id])
+    attachments.delete_files(records)
     return {"ok": True}
 
 
@@ -528,6 +674,16 @@ async def create_chat_job(body: ChatJobBody, user: dict = Depends(require_user))
         clean.append({"role": message.role, "content": content})
     if not clean:
         raise HTTPException(status_code=400, detail="messages 不能为空")
+    attachment_ids = list(dict.fromkeys(body.attachment_ids))
+    if any(not re.fullmatch(r"[a-f0-9]{32}", item) for item in attachment_ids):
+        raise HTTPException(status_code=400, detail="无效的附件标识")
+    attachment_records = users.get_attachments(
+        user["id"],
+        body.conversation_id,
+        attachment_ids,
+    )
+    if len(attachment_records) != len(attachment_ids):
+        raise HTTPException(status_code=400, detail="部分附件不存在、已过期或不属于当前对话")
     model = body.model or default_model_id()
     if not get_model_config(model):
         raise HTTPException(status_code=400, detail=f"模型不可用: {model}")
@@ -538,6 +694,7 @@ async def create_chat_job(body: ChatJobBody, user: dict = Depends(require_user))
         title,
         clean,
         model,
+        attachment_records,
     )
 
 

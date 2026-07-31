@@ -46,7 +46,7 @@ validate_inputs() {
 }
 
 install_dependencies() {
-  local packages=(ca-certificates curl openssl python3 python3-pip python3-venv)
+  local packages=(ca-certificates curl openssl poppler-utils python3 python3-pip python3-venv)
   local missing=()
   local package
 

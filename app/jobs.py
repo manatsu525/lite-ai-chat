@@ -5,11 +5,12 @@ import time
 import uuid
 from typing import Dict, List, Optional
 
-from . import users
+from . import attachments, users
 from .agent import run_agent_stream
 
 _tasks: Dict[str, asyncio.Task] = {}
 _start_lock = asyncio.Lock()
+_attachment_job_lock = asyncio.Lock()
 
 
 def _status_label(status: dict) -> str:
@@ -57,13 +58,28 @@ async def _run_job(
     title: str,
     messages: List[dict],
     model: str,
+    attachment_records: List[dict],
 ) -> None:
     content = ""
     status_message = "思考中…"
     last_persist = 0.0
+    attachment_lock_acquired = False
     users.update_chat_job(job_id, "running", content, status_message)
     try:
-        async for frame in run_agent_stream(messages, model=model):
+        model_messages = messages
+        if attachment_records:
+            status_message = "正在等待附件任务…"
+            users.update_chat_job(job_id, "running", content, status_message)
+            await _attachment_job_lock.acquire()
+            attachment_lock_acquired = True
+            status_message = "正在读取附件…"
+            users.update_chat_job(job_id, "running", content, status_message)
+            model_messages = await asyncio.to_thread(
+                attachments.build_model_messages,
+                messages,
+                attachment_records,
+            )
+        async for frame in run_agent_stream(model_messages, model=model):
             for line in frame.splitlines():
                 if not line.startswith("data: "):
                     continue
@@ -131,6 +147,14 @@ async def _run_job(
             error,
         )
     finally:
+        if attachment_lock_acquired:
+            _attachment_job_lock.release()
+        if attachment_records:
+            deleted = users.delete_attachments(
+                user_id,
+                [record["id"] for record in attachment_records],
+            )
+            await asyncio.to_thread(attachments.delete_files, deleted)
         _tasks.pop(job_id, None)
 
 
@@ -140,7 +164,9 @@ async def start_job(
     title: str,
     messages: List[dict],
     model: str,
+    attachment_records: Optional[List[dict]] = None,
 ) -> dict:
+    attachment_records = attachment_records or []
     async with _start_lock:
         active = users.get_active_chat_job(user_id)
         if active:
@@ -155,6 +181,7 @@ async def start_job(
                 title,
                 messages,
                 model,
+                attachment_records,
             )
         )
         _tasks[job_id] = task

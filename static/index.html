@@ -416,6 +416,64 @@
       gap: 0.6rem;
       align-items: flex-end;
     }
+    .attachment-tray {
+      display: none;
+      max-width: 860px;
+      max-height: 92px;
+      margin: 0 auto 0.5rem;
+      padding: 0.4rem;
+      overflow-y: auto;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    .attachment-tray.visible { display: flex; }
+    .attachment-chip {
+      display: inline-flex;
+      max-width: 100%;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.28rem 0.4rem;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 0.72rem;
+    }
+    .attachment-chip .attachment-name {
+      max-width: 240px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .attachment-remove {
+      width: 1.2rem;
+      height: 1.2rem;
+      padding: 0;
+      color: var(--danger);
+      background: transparent;
+      border: 0;
+      line-height: 1;
+    }
+    .attachment-remove:hover { color: #ff9aa0; background: transparent; }
+    .attach-btn {
+      width: 48px;
+      padding: 0 !important;
+      color: var(--muted);
+      background: transparent;
+      border: 1px solid var(--border);
+      font-size: 1.25rem;
+    }
+    .attach-btn:hover { color: var(--text); background: var(--bg); }
+    .attachment-status {
+      max-width: 860px;
+      min-height: 0;
+      margin: 0.3rem auto 0;
+      color: var(--muted);
+      font-size: 0.72rem;
+    }
+    .attachment-status.bad { color: var(--danger); }
     .composer textarea {
       min-height: 48px;
       max-height: 160px;
@@ -532,6 +590,7 @@
       }
       .composer-inner { gap: 0.35rem; }
       .composer textarea { min-height: 40px; }
+      .attach-btn { width: 40px !important; }
       .composer button {
         height: 40px;
         padding: 0 0.75rem;
@@ -589,11 +648,15 @@
       <div class="empty" id="empty-hint">发送消息开始对话<br />支持网络搜索与网页抓取</div>
     </div>
     <div class="composer">
+      <div class="attachment-tray" id="attachment-tray"></div>
       <div class="composer-inner">
+        <input id="file-input" type="file" multiple hidden />
+        <button class="attach-btn" id="attach-btn" type="button" title="上传图片或文件" aria-label="上传图片或文件">＋</button>
         <textarea id="input" rows="1" placeholder="输入消息… (Enter 发送，Shift+Enter 换行)"></textarea>
         <button class="danger" id="stop-btn" type="button" style="display:none">停止</button>
         <button id="send-btn" type="button">发送</button>
       </div>
+      <div class="attachment-status" id="attachment-status"></div>
       <div class="hint">生成在服务器后台继续，刷新、锁屏或关闭页面后可回来查看 · 后端自动多轮工具调用</div>
     </div>
   </div>
@@ -697,6 +760,10 @@
     let jobPollTimer = null;
     let isAdmin = false;
     let currentUserId = 0;
+    let pendingAttachments = [];
+    let uploadingAttachments = false;
+    const MAX_ATTACHMENT_FILES = 10;
+    const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 
     const $ = (id) => document.getElementById(id);
 
@@ -861,6 +928,8 @@
     }
 
     function createConversation() {
+      pendingAttachments = [];
+      renderAttachments();
       currentConversationId = newConversationId();
       history = [];
       conversations.unshift({
@@ -895,6 +964,7 @@
       }));
       renderConversationSelect();
       renderConversation();
+      await loadPendingAttachments();
       return item;
     }
 
@@ -1716,6 +1786,131 @@
       return c;
     }
 
+    function formatBytes(value) {
+      const bytes = Number(value) || 0;
+      if (bytes < 1024) return bytes + "B";
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + "KB";
+      return (bytes / 1024 / 1024).toFixed(1) + "MB";
+    }
+
+    function setAttachmentStatus(message, bad = false) {
+      const status = $("attachment-status");
+      status.textContent = message || "";
+      status.className = "attachment-status" + (bad ? " bad" : "");
+    }
+
+    function renderAttachments() {
+      const tray = $("attachment-tray");
+      tray.innerHTML = "";
+      tray.classList.toggle("visible", pendingAttachments.length > 0);
+      for (const item of pendingAttachments) {
+        const chip = document.createElement("div");
+        chip.className = "attachment-chip";
+        const icon = item.kind === "image" ? "🖼️" : "📄";
+        chip.innerHTML =
+          '<span aria-hidden="true">' + icon + '</span>' +
+          '<span class="attachment-name"></span>' +
+          '<span>' + formatBytes(item.size) + '</span>' +
+          '<button class="attachment-remove" type="button" title="移除附件" aria-label="移除附件">×</button>';
+        chip.querySelector(".attachment-name").textContent = item.name;
+        chip.querySelector(".attachment-remove").onclick = async () => {
+          if (busy || uploadingAttachments) return;
+          try {
+            await api("/api/attachments/" + encodeURIComponent(item.id), {
+              method: "DELETE",
+            });
+          } catch (_) {}
+          pendingAttachments = pendingAttachments.filter(
+            (attachment) => attachment.id !== item.id,
+          );
+          renderAttachments();
+        };
+        tray.appendChild(chip);
+      }
+    }
+
+    async function loadPendingAttachments() {
+      pendingAttachments = [];
+      renderAttachments();
+      if (!currentConversationId) return;
+      try {
+        const res = await api(
+          "/api/attachments?conversation_id=" +
+          encodeURIComponent(currentConversationId),
+        );
+        if (!res.ok) return;
+        const payload = await res.json();
+        pendingAttachments = payload.data || [];
+        renderAttachments();
+      } catch (_) {}
+    }
+
+    async function uploadOneAttachment(file) {
+      const params = new URLSearchParams({
+        conversation_id: currentConversationId,
+        filename: file.name || "attachment",
+      });
+      const headers = {};
+      const token = getToken();
+      if (token) headers["Authorization"] = "Bearer " + token;
+      headers["Content-Type"] = file.type || "application/octet-stream";
+      const res = await fetch("/api/attachments?" + params.toString(), {
+        method: "POST",
+        cache: "no-store",
+        headers,
+        body: file,
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload.detail || "附件上传失败");
+      return payload;
+    }
+
+    $("attach-btn").onclick = () => {
+      if (!busy && !uploadingAttachments) $("file-input").click();
+    };
+    $("file-input").addEventListener("change", async (event) => {
+      const files = Array.from(event.target.files || []);
+      event.target.value = "";
+      if (!files.length) return;
+      if (pendingAttachments.length + files.length > MAX_ATTACHMENT_FILES) {
+        setAttachmentStatus("一次消息最多上传 10 个附件。", true);
+        return;
+      }
+      const currentBytes = pendingAttachments.reduce(
+        (sum, item) => sum + (Number(item.size) || 0),
+        0,
+      );
+      const newBytes = files.reduce((sum, file) => sum + file.size, 0);
+      if (files.some((file) => file.size > MAX_ATTACHMENT_BYTES) ||
+          currentBytes + newBytes > MAX_ATTACHMENT_BYTES) {
+        setAttachmentStatus("一次消息的附件总量不能超过 50MB。", true);
+        return;
+      }
+
+      uploadingAttachments = true;
+      $("attach-btn").disabled = true;
+      $("send-btn").disabled = true;
+      try {
+        for (let index = 0; index < files.length; index++) {
+          setAttachmentStatus(
+            "正在处理附件 " + (index + 1) + "/" + files.length + "：" + files[index].name,
+          );
+          const uploaded = await uploadOneAttachment(files[index]);
+          pendingAttachments.push(uploaded);
+          renderAttachments();
+        }
+        setAttachmentStatus(
+          "附件已就绪。图片会压缩后发送，文档只提取有限文字。",
+        );
+      } catch (error) {
+        setAttachmentStatus(error.message, true);
+      } finally {
+        uploadingAttachments = false;
+        $("attach-btn").disabled = busy;
+        $("send-btn").disabled = busy;
+      }
+    });
+
     function autoResize() {
       const ta = $("input");
       ta.style.height = "auto";
@@ -1734,6 +1929,8 @@
     function setBusyState(value) {
       busy = value;
       $("send-btn").disabled = value;
+      $("attach-btn").disabled = value;
+      $("file-input").disabled = value;
       $("model-select").disabled = value;
       $("conversation-select").disabled = value;
       $("history-prev").disabled = value || conversationPage <= 1;
@@ -1863,7 +2060,7 @@
       }
     }
 
-    async function startAssistantGeneration() {
+    async function startAssistantGeneration(attachmentIds = []) {
       setBusyState(true);
       await persistConversation();
 
@@ -1882,23 +2079,26 @@
             messages: history.map((m) => ({ role: m.role, content: m.content })),
             conversation_id: currentConversationId,
             title: currentTitle(),
+            attachment_ids: attachmentIds,
           }),
         });
         if (res.status === 401) {
           clearAuth();
           location.reload();
-          return;
+          return false;
         }
         const job = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(job.detail || "后台任务提交失败");
         currentJobId = job.id;
         statusEl.textContent = job.status_message || "后台生成中…";
         pollJob(job.id, contentEl, statusEl, true);
+        return true;
       } catch (e) {
         const row = statusEl.closest(".msg");
         if (row) row.remove();
         setAssistantContent(contentEl, "请求失败：" + e.message);
         setBusyState(false);
+        return false;
       }
     }
 
@@ -1926,19 +2126,31 @@
     }
 
     async function send() {
-      if (busy) return;
+      if (busy || uploadingAttachments) return;
       const text = $("input").value.trim();
-      if (!text) return;
+      if (!text && !pendingAttachments.length) return;
+      const attachmentIds = pendingAttachments.map((item) => item.id);
+      const attachmentSummary = pendingAttachments.length
+        ? "\n\n" + pendingAttachments.map(
+            (item) => "📎 " + item.name + "（" + formatBytes(item.size) + "）",
+          ).join("\n")
+        : "";
+      const displayText = (text || "请分析这些附件。") + attachmentSummary;
       $("input").value = "";
       autoResize();
 
-      history.push({ role: "user", content: text });
-      appendMsg("user", text, false, {
+      history.push({ role: "user", content: displayText });
+      appendMsg("user", displayText, false, {
         messageIndex: history.length - 1,
         showActions: true,
         followIfNearBottom: true,
       });
-      await startAssistantGeneration();
+      const started = await startAssistantGeneration(attachmentIds);
+      if (started) {
+        pendingAttachments = [];
+        renderAttachments();
+        setAttachmentStatus("");
+      }
     }
 
     init();

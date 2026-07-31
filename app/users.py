@@ -86,6 +86,29 @@ def init_db() -> None:
             )
             c.execute(
                 """
+                CREATE TABLE IF NOT EXISTS attachments (
+                    id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    original_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    stored_path TEXT NOT NULL,
+                    original_size INTEGER NOT NULL,
+                    processed_size INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                        DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+                """
+            )
+            c.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_attachments_user_conversation
+                ON attachments(user_id, conversation_id, created_at)
+                """
+            )
+            c.execute(
+                """
                 UPDATE chat_jobs
                 SET status = 'interrupted',
                     error = '服务重启，后台任务已中断',
@@ -220,8 +243,176 @@ def delete_managed_user(user_id: int) -> None:
                 raise ValueError("不能删除管理员账号")
             c.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
             c.execute("DELETE FROM chat_jobs WHERE user_id = ?", (user_id,))
+            c.execute("DELETE FROM attachments WHERE user_id = ?", (user_id,))
             c.execute("DELETE FROM users WHERE id = ?", (user_id,))
             c.commit()
+
+
+def create_attachment(
+    attachment_id: str,
+    user_id: int,
+    conversation_id: str,
+    original_name: str,
+    kind: str,
+    media_type: str,
+    stored_path: str,
+    original_size: int,
+    processed_size: int,
+) -> dict:
+    with _lock:
+        with _conn() as c:
+            c.execute(
+                """
+                INSERT INTO attachments (
+                    id, user_id, conversation_id, original_name, kind,
+                    media_type, stored_path, original_size, processed_size
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attachment_id,
+                    user_id,
+                    conversation_id,
+                    original_name,
+                    kind,
+                    media_type,
+                    stored_path,
+                    int(original_size),
+                    int(processed_size),
+                ),
+            )
+            c.commit()
+    return get_attachment(user_id, attachment_id)
+
+
+def get_attachment(user_id: int, attachment_id: str) -> Optional[dict]:
+    with _conn() as c:
+        row = c.execute(
+            """
+            SELECT id, conversation_id, original_name, kind, media_type,
+                   stored_path, original_size, processed_size, created_at
+            FROM attachments
+            WHERE user_id = ? AND id = ?
+            """,
+            (user_id, attachment_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_attachments(
+    user_id: int,
+    conversation_id: str,
+    attachment_ids: Optional[list] = None,
+) -> list:
+    with _conn() as c:
+        if attachment_ids is None:
+            rows = c.execute(
+                """
+                SELECT id, conversation_id, original_name, kind, media_type,
+                       stored_path, original_size, processed_size, created_at
+                FROM attachments
+                WHERE user_id = ? AND conversation_id = ?
+                ORDER BY created_at ASC
+                """,
+                (user_id, conversation_id),
+            ).fetchall()
+        else:
+            unique_ids = list(dict.fromkeys(str(item) for item in attachment_ids))
+            if not unique_ids:
+                return []
+            placeholders = ",".join("?" for _ in unique_ids)
+            rows = c.execute(
+                f"""
+                SELECT id, conversation_id, original_name, kind, media_type,
+                       stored_path, original_size, processed_size, created_at
+                FROM attachments
+                WHERE user_id = ? AND conversation_id = ?
+                  AND id IN ({placeholders})
+                ORDER BY created_at ASC
+                """,
+                (user_id, conversation_id, *unique_ids),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_all_attachments_for_user(user_id: int) -> list:
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT id, conversation_id, original_name, kind, media_type,
+                   stored_path, original_size, processed_size, created_at
+            FROM attachments
+            WHERE user_id = ?
+            ORDER BY created_at ASC
+            """,
+            (user_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def attachment_usage(user_id: int, conversation_id: str) -> dict:
+    with _conn() as c:
+        row = c.execute(
+            """
+            SELECT COUNT(*) AS count, COALESCE(SUM(original_size), 0) AS bytes
+            FROM attachments
+            WHERE user_id = ? AND conversation_id = ?
+            """,
+            (user_id, conversation_id),
+        ).fetchone()
+    return {"count": int(row["count"]), "bytes": int(row["bytes"])}
+
+
+def delete_attachments(user_id: int, attachment_ids: list) -> list:
+    unique_ids = list(dict.fromkeys(str(item) for item in attachment_ids))
+    if not unique_ids:
+        return []
+    placeholders = ",".join("?" for _ in unique_ids)
+    with _lock:
+        with _conn() as c:
+            rows = c.execute(
+                f"""
+                SELECT id, stored_path FROM attachments
+                WHERE user_id = ? AND id IN ({placeholders})
+                """,
+                (user_id, *unique_ids),
+            ).fetchall()
+            c.execute(
+                f"""
+                DELETE FROM attachments
+                WHERE user_id = ? AND id IN ({placeholders})
+                """,
+                (user_id, *unique_ids),
+            )
+            c.commit()
+    return [dict(row) for row in rows]
+
+
+def cleanup_expired_attachments(max_age_hours: int = 24) -> list:
+    """返回已从数据库移除的附件路径，由调用方删除文件。"""
+    hours = max(1, min(int(max_age_hours), 168))
+    with _lock:
+        with _conn() as c:
+            rows = c.execute(
+                """
+                SELECT id, stored_path FROM attachments
+                WHERE julianday(created_at) < julianday('now', ?)
+                """,
+                (f"-{hours} hours",),
+            ).fetchall()
+            if rows:
+                c.executemany(
+                    "DELETE FROM attachments WHERE id = ?",
+                    [(row["id"],) for row in rows],
+                )
+            c.commit()
+    return [dict(row) for row in rows]
+
+
+def all_attachment_paths() -> set:
+    with _conn() as c:
+        rows = c.execute("SELECT stored_path FROM attachments").fetchall()
+    return {str(row["stored_path"]) for row in rows}
 
 
 def list_conversations(user_id: int, limit: int = 10) -> list:

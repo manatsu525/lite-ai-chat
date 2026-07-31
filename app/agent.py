@@ -212,6 +212,17 @@ def _extract_error_payload(resp_text: str) -> dict:
         return {"error": {"message": resp_text[:800]}}
 
 
+def _has_image_content(messages: List[dict]) -> bool:
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            isinstance(item, dict) and item.get("type") == "image_url"
+            for item in content
+        ):
+            return True
+    return False
+
+
 class ToolUseFailed(Exception):
     """Groq 返回 tool_use_failed，已解析出 synthetic tool_calls。"""
 
@@ -263,6 +274,11 @@ async def _call_llm_with_model(messages: List[dict], model: str, with_tools: boo
                 )
                 if calls:
                     raise ToolUseFailed(calls, failed_gen)
+            if _has_image_content(messages) and r.status_code in (400, 404, 415, 422):
+                raise RuntimeError(
+                    "所选模型或接口不接受图片输入，请改用支持视觉的多模态模型。"
+                    f"（上游 HTTP {r.status_code}）"
+                )
             raise RuntimeError(f"LLM HTTP {r.status_code}: {r.text[:800]}")
         return r.json()
 
