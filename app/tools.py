@@ -79,7 +79,11 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "scrape_url",
-            "description": "抓取指定 URL 的网页正文，转为 markdown。适合阅读搜索结果中的具体页面。",
+            "description": (
+                "抓取指定 URL 的网页正文，转为 markdown。适合阅读搜索结果中的具体页面。"
+                "优先选择无需登录、验证码且可公开读取的官网或媒体来源；"
+                "同等信息下避免知乎、百度系、抖音、头条、小红书。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

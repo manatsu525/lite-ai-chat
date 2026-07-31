@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -27,6 +28,13 @@ _MAX_EXTERNAL_SCRAPES = 5
 _MAX_TOOL_RESULT_CHARS = 60000
 _RECENT_CONVERSATION_ROUNDS = 10
 _OLDER_HISTORY_SUMMARY_CHARS = 6000
+_SCRAPE_AVOID_DOMAINS = (
+    "baidu.com",
+    "douyin.com",
+    "toutiao.com",
+    "xiaohongshu.com",
+    "zhihu.com",
+)
 
 
 @dataclass(frozen=True)
@@ -72,7 +80,7 @@ def _system_prompt(budget: AgentBudget) -> str:
 1. 需要实时或外部信息时，调用 web_search。它是独立于当前模型的外部搜索服务。
 2. 每轮搜索后先判断结果是否真正回答了问题；若无关、不完整、互相冲突或缺少权威来源，不要仓促回答，要换一个明显不同且更精确的查询继续搜索。
 3. 改写查询时可加入准确年份、关键实体、官方域名或 site: 限定。最多进行 {budget.max_searches} 次 web_search，每次最多返回 {budget.max_search_results} 条结果；不要重复完全相同的查询。
-4. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。优先政府、学校、机构官网等一手来源。若结果标记 partial 或 search_index_fallback，表示源站阻止抓取、当前只有搜索索引摘要；不得把它当作网页全文，也不能推断摘要未提及的细节。{tool_limit}
+4. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。优先政府、学校、机构官网等一手来源；同等信息下避开知乎、百度系、抖音、头条、小红书等经常要求登录、验证码或阻止 VPS 访问的站点，改选搜索结果中可公开读取的来源。若结果标记 partial 或 search_index_fallback，表示源站阻止抓取、当前只有搜索索引摘要；不得把它当作网页全文，也不能推断摘要未提及的细节。{tool_limit}
 5. 回答具体日期时，正文必须明确说明该日期对应用户所问事件；网页的“发布时间/更新时间”不能当成开学、放假等事件日期。若抓到的只是列表页、图片页或正文没有答案，应继续换查询搜索，不能猜测。
 6. 不要编造链接或事实；最终回答必须基于工具结果，并附上实际来源链接。达到搜索上限仍无可靠答案时，要如实说明未核实到。
 7. 使用与用户相同的语言回答。
@@ -365,6 +373,25 @@ async def _apply_tool_calls(
         fn = tc.get("function") or {}
         name = fn.get("name") or ""
         args = fn.get("arguments") or "{}"
+        routing = None
+        if name == "scrape_url":
+            replacement = _replacement_scrape_source(msgs, args)
+            if replacement:
+                original_args = _tool_arguments(tc)
+                requested_url = str(original_args.get("url") or "")
+                replacement_url = str(replacement.get("url") or "")
+                routing = {
+                    "requested_url": requested_url,
+                    "replacement_url": replacement_url,
+                    "replacement_title": str(
+                        replacement.get("title") or ""
+                    )[:300],
+                }
+                fn["arguments"] = json.dumps(
+                    {"url": replacement_url},
+                    ensure_ascii=False,
+                )
+                args = fn["arguments"]
         tc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
         logger.info("exec tool %s args=%s", name, str(args)[:200])
         try:
@@ -380,6 +407,7 @@ async def _apply_tool_calls(
                 ensure_ascii=False,
             )
         if name == "scrape_url":
+            result = _annotate_scrape_routing(result, routing)
             result = _scrape_search_index_fallback(msgs, args, result)
         msgs.append(
             {
@@ -395,6 +423,103 @@ async def _apply_tool_calls(
 
 def _normalized_url(value: str) -> str:
     return re.sub(r"[#?].*$", "", str(value or "")).rstrip("/").lower()
+
+
+def _url_host(value: str) -> str:
+    try:
+        return (urlparse(str(value or "")).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _avoid_scrape_url(value: str) -> bool:
+    host = _url_host(value)
+    return any(
+        host == domain or host.endswith("." + domain)
+        for domain in _SCRAPE_AVOID_DOMAINS
+    )
+
+
+def _replacement_scrape_source(
+    messages: List[dict],
+    arguments: Any,
+) -> Optional[dict]:
+    """已知强反爬来源改抓同一搜索轮中的可访问候选。"""
+    try:
+        args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    target_url = str(args.get("url") or "")
+    if not _avoid_scrape_url(target_url):
+        return None
+    normalized_target = _normalized_url(target_url)
+    used_urls = set()
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        try:
+            payload = json.loads(message.get("content") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for key in ("url", "requested_url", "replacement_url"):
+            normalized = _normalized_url(payload.get(key))
+            if normalized:
+                used_urls.add(normalized)
+
+    for message in reversed(messages):
+        if message.get("role") != "tool":
+            continue
+        try:
+            payload = json.loads(message.get("content") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            continue
+        if not any(
+            _normalized_url(item.get("url")) == normalized_target
+            for item in results
+            if isinstance(item, dict)
+        ):
+            continue
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            candidate = str(item.get("url") or "")
+            normalized = _normalized_url(candidate)
+            if (
+                not candidate.startswith(("http://", "https://"))
+                or not normalized
+                or normalized == normalized_target
+                or normalized in used_urls
+                or _avoid_scrape_url(candidate)
+            ):
+                continue
+            return item
+    return None
+
+
+def _annotate_scrape_routing(
+    result: str,
+    routing: Optional[dict],
+) -> str:
+    if not routing:
+        return result
+    try:
+        payload = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return result
+    if not isinstance(payload, dict):
+        return result
+    payload["requested_url"] = routing["requested_url"]
+    payload["replacement_url"] = routing["replacement_url"]
+    payload["routing_note"] = (
+        "原来源经常阻止 VPS 抓取，已自动改用同一轮搜索中的可访问候选："
+        + (routing.get("replacement_title") or routing["replacement_url"])
+    )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _scrape_search_index_fallback(
@@ -522,6 +647,8 @@ def _tool_trace_event(
         event["state"] = "error"
     if payload.get("warning"):
         event["warning"] = str(payload["warning"])[:500]
+    if payload.get("routing_note"):
+        event["routing_note"] = str(payload["routing_note"])[:500]
     if name == "web_search":
         event["source"] = str(payload.get("source") or "")[:100]
         event["results"] = [

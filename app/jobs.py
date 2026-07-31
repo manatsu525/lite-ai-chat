@@ -35,6 +35,7 @@ def clean_trace(value: Any) -> List[dict]:
             ("excerpt", 2000),
             ("error", 500),
             ("warning", 500),
+            ("routing_note", 500),
         ):
             if raw.get(key):
                 item[key] = str(raw[key])[:limit]

@@ -2006,6 +2006,12 @@
             event.warning + "；下方内容为搜索索引摘要，并非网页全文。";
           eventContent.appendChild(warning);
         }
+        if (event.routing_note) {
+          const routingNote = document.createElement("div");
+          routingNote.className = "trace-query";
+          routingNote.textContent = event.routing_note;
+          eventContent.appendChild(routingNote);
+        }
         if (event.kind === "search") {
           const results = Array.isArray(event.results) ? event.results : [];
           if (!results.length && event.state !== "running" && !event.error) {
