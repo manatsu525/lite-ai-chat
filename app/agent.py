@@ -85,7 +85,7 @@ def _system_prompt(budget: AgentBudget) -> str:
 1. 需要实时或外部信息时，调用 web_search。它是独立于当前模型的外部搜索服务。
 2. 每轮搜索后先判断结果是否真正回答了问题；若无关、不完整、互相冲突或缺少权威来源，不要仓促回答，要换一个明显不同且更精确的查询继续搜索。
 3. 改写查询时可加入准确年份、关键实体、官方域名或 site: 限定。最多进行 {budget.max_searches} 次 web_search，每次最多返回 {budget.max_search_results} 条结果；不要重复完全相同的查询。
-4. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。优先政府、学校、机构官网等一手来源；同等信息下避开知乎、百度搜索、百度贴吧、抖音、头条、小红书、什么值得买等已经实测会要求验证、拒绝 VPS 访问或只返回 JavaScript 空壳的站点，改选搜索结果中可公开读取的来源。百度百科、百度文库等未被固定屏蔽的百度子站仍应正常尝试读取。若结果标记 partial 或 search_index_fallback，表示源站阻止抓取、当前只有搜索索引摘要；不得把它当作网页全文，也不能推断摘要未提及的细节。{tool_limit}
+4. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。优先政府、学校、机构官网等一手来源；同等信息下避开知乎、百度搜索、百度贴吧、抖音、头条、小红书、什么值得买等已经实测会要求验证、拒绝 VPS 访问或只返回 JavaScript 空壳的站点，改选搜索结果中可公开读取的来源。百度百科、百度文库等未被固定屏蔽的百度子站仍应正常尝试读取。若结果标记 partial 或 search_index_fallback，表示源站阻止抓取、当前只有搜索索引摘要；不得把它当作网页全文，也不能推断摘要未提及的细节。此类失败抓取不占抓取及工具调用配额，应在还有工具轮数时改抓其他相关搜索结果。{tool_limit}
 5. 回答具体日期时，正文必须明确说明该日期对应用户所问事件；网页的“发布时间/更新时间”不能当成开学、放假等事件日期。若抓到的只是列表页、图片页或正文没有答案，应继续换查询搜索，不能猜测。
 6. 不要编造链接或事实；最终回答必须基于工具结果，并附上实际来源链接。达到搜索上限仍无可靠答案时，要如实说明未核实到。
 7. 使用与用户相同的语言回答。
@@ -661,6 +661,8 @@ def _tool_trace_event(
         event["warning"] = str(payload["warning"])[:500]
     if payload.get("routing_note"):
         event["routing_note"] = str(payload["routing_note"])[:500]
+    if payload.get("partial"):
+        event["partial"] = True
     if name == "web_search":
         event["source"] = str(payload.get("source") or "")[:100]
         event["results"] = [
@@ -686,6 +688,29 @@ def _tool_trace_event(
             body = payload.get("content")
         event["excerpt"] = str(body or "")[:2000]
     return event
+
+
+def _refund_failed_scrape_quota(
+    events: List[dict],
+    tool_calls_used: int,
+    scrape_calls: int,
+) -> Tuple[int, int]:
+    """失败或仅返回搜索摘要的抓取不占工具及抓取配额。"""
+    refundable = 0
+    for event in events:
+        if event.get("tool") != "scrape_url":
+            continue
+        if (
+            event.get("state") == "error"
+            or event.get("source") == "search_index_fallback"
+            or event.get("partial") is True
+        ):
+            event["counts_toward_tool_limit"] = False
+            refundable += 1
+    return (
+        max(0, tool_calls_used - refundable),
+        max(0, scrape_calls - refundable),
+    )
 
 
 def _tool_running_events(tool_calls: List[dict]) -> List[dict]:
@@ -1069,6 +1094,11 @@ async def run_agent_stream(
                 message,
                 budget.max_search_results,
             )
+            tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
+                tool_events,
+                tool_calls_used,
+                scrape_calls,
+            )
 
             done = _chunk(model=use_model, cid=cid)
             done["status"] = {
@@ -1096,6 +1126,11 @@ async def run_agent_stream(
                     tool_calls,
                     message,
                     budget.max_search_results,
+                )
+                tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
+                    tool_events,
+                    tool_calls_used,
+                    scrape_calls,
                 )
                 tool_done = _chunk(model=use_model, cid=cid)
                 tool_done["status"] = {
@@ -1322,11 +1357,16 @@ async def run_agent_sync(
                 for tc in tool_calls
                 if (tc.get("function") or {}).get("name") == "scrape_url"
             )
-            await _apply_tool_calls(
+            tool_events = await _apply_tool_calls(
                 msgs,
                 tool_calls,
                 message,
                 budget.max_search_results,
+            )
+            tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
+                tool_events,
+                tool_calls_used,
+                scrape_calls,
             )
             continue
 
@@ -1340,11 +1380,16 @@ async def run_agent_sync(
             )
             if tool_calls:
                 tool_calls_used += len(tool_calls)
-                await _apply_tool_calls(
+                tool_events = await _apply_tool_calls(
                     msgs,
                     tool_calls,
                     message,
                     budget.max_search_results,
+                )
+                tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
+                    tool_events,
+                    tool_calls_used,
+                    scrape_calls,
                 )
             msgs.append(
                 {
