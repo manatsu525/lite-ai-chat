@@ -126,6 +126,7 @@ class _HTMLToText(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         t = tag.lower()
+        attr_map = dict(attrs)
         if t in self.SKIP:
             self._skip += 1
             return
@@ -133,13 +134,19 @@ class _HTMLToText(HTMLParser):
             return
         if t in ("p", "div", "br", "tr", "li", "h1", "h2", "h3", "h4"):
             self._parts.append("\n")
+        if t in ("td", "th"):
+            self._parts.append(" | ")
         if t in ("h1", "h2", "h3", "h4"):
             self._parts.append("\n" + "#" * int(t[1]) + " ")
         if t == "li":
             self._parts.append("- ")
         if t == "a":
-            self._href = dict(attrs).get("href")
+            self._href = attr_map.get("href")
             self._parts.append("[")
+        if t == "img":
+            alt = (attr_map.get("alt") or attr_map.get("title") or "").strip()
+            if alt:
+                self._parts.append(alt + " ")
         if t in ("b", "strong"):
             self._parts.append("**")
         if t in ("i", "em"):
@@ -160,7 +167,9 @@ class _HTMLToText(HTMLParser):
             self._parts.append("**")
         if t in ("i", "em"):
             self._parts.append("*")
-        if t in ("p", "div", "li", "h1", "h2", "h3", "h4"):
+        if t in ("td", "th"):
+            self._parts.append(" | ")
+        if t in ("p", "div", "tr", "li", "h1", "h2", "h3", "h4"):
             self._parts.append("\n")
 
     def handle_data(self, data):
@@ -216,9 +225,218 @@ def _clean_extracted_text(text: str) -> str:
     return text
 
 
+def _css_pixel(style: str, key: str) -> Optional[float]:
+    match = re.search(
+        rf"(?:^|;)\s*{re.escape(key)}\s*:\s*(-?[0-9.]+)px",
+        style or "",
+        re.I,
+    )
+    return float(match.group(1)) if match else None
+
+
+def _resource_name(element) -> str:
+    names = {
+        "gold_": "Gold",
+        "wood_": "Wood",
+        "ore_": "Ore",
+        "mercury_": "Mercury",
+        "sulfur_": "Sulfur",
+        "crystal_": "Crystal",
+        "gem_": "Gem",
+    }
+    found = []
+    for image in element.xpath(".//img"):
+        src = str(image.get("src") or "").lower().rsplit("/", 1)[-1]
+        for marker, label in names.items():
+            if marker in src and label not in found:
+                found.append(label)
+    return "+".join(found)
+
+
+def _visual_grid_value(element) -> str:
+    text = " ".join(element.text_content().split())
+    resource = _resource_name(element)
+    if resource and text and text != "-":
+        return f"{text} {resource}"
+    if resource and not text:
+        return resource
+    return text
+
+
+def _mediawiki_positioned_grid(container) -> str:
+    """把 MediaWiki 用绝对坐标绘制的“视觉表格”还原为 Markdown 表格。"""
+    absolute = container.xpath('.//*[contains(@style, "position:absolute")]')
+
+    def column(key: str, value: float) -> List[Tuple[float, str]]:
+        out = []
+        for element in absolute:
+            position = _css_pixel(element.get("style") or "", key)
+            top = _css_pixel(element.get("style") or "", "top")
+            if position is None or top is None or abs(position - value) > 0.5:
+                continue
+            text = " ".join(element.text_content().split())
+            if text:
+                out.append((top, text))
+        return sorted(out)
+
+    buildings = column("left", 156)
+    creatures = column("left", 584)
+    max_week = column("right", 74)
+    if min(len(buildings), len(creatures), len(max_week)) < 2:
+        return ""
+
+    row_count = min(len(buildings), len(creatures))
+    creature_tops = [item[0] for item in creatures[:row_count]]
+
+    def nearest_row(top: float) -> Optional[int]:
+        if not creature_tops:
+            return None
+        index = min(
+            range(len(creature_tops)),
+            key=lambda item: abs(creature_tops[item] - top),
+        )
+        return index if abs(creature_tops[index] - top) <= 24 else None
+
+    cost_rows: List[List[str]] = [[] for _ in range(row_count)]
+    for element in absolute:
+        style = element.get("style") or ""
+        top = _css_pixel(style, "top")
+        width = _css_pixel(style, "width")
+        if top is None or width is None or not element.xpath("./p"):
+            continue
+        index = nearest_row(top)
+        if index is None:
+            continue
+        value = _visual_grid_value(element)
+        if value and value != "-":
+            cost_rows[index].append(value)
+
+    cost_week_rows: List[List[str]] = [[] for _ in range(row_count)]
+    for element in absolute:
+        style = element.get("style") or ""
+        if _css_pixel(style, "right") != 6:
+            continue
+        top = _css_pixel(style, "top")
+        if top is None:
+            continue
+        index = nearest_row(top)
+        if index is None:
+            continue
+        value = _visual_grid_value(element)
+        if value and value != "-":
+            cost_week_rows[index].append(value)
+
+    lines = [
+        "| Building | Cost | Creature | Max/Wk | Cost/Wk |",
+        "|---|---:|---|---:|---:|",
+    ]
+    for index in range(row_count):
+        max_index = min(index // 2, len(max_week) - 1)
+        values = (
+            buildings[index][1],
+            " + ".join(cost_rows[index]) if cost_rows[index] else "-",
+            creatures[index][1],
+            max_week[max_index][1],
+            (
+                " + ".join(cost_week_rows[index])
+                if cost_week_rows[index]
+                else "-"
+            ),
+        )
+        escaped = [str(value).replace("|", r"\|") for value in values]
+        lines.append("| " + " | ".join(escaped) + " |")
+    return "\n".join(lines)
+
+
+def _mediawiki_main_markdown(html: str) -> Optional[Tuple[str, str, str]]:
+    """MediaWiki 正文和表格保留器；普通文章继续交给 Readability。"""
+    if "mw-content-text" not in html:
+        return None
+    try:
+        from lxml import etree
+        from lxml import html as lxml_html
+
+        document = lxml_html.fromstring(html)
+        roots = document.xpath('//*[@id="mw-content-text"]')
+        if not roots:
+            return None
+        root = roots[0]
+        heading = document.xpath('//*[@id="firstHeading"]')
+        title = (
+            " ".join(heading[0].text_content().split())
+            if heading
+            else ""
+        )
+        grids = []
+        for container in root.xpath('.//*[contains(@style, "position:relative")]'):
+            grid = _mediawiki_positioned_grid(container)
+            if not grid:
+                continue
+            grids.append(grid)
+            parent = container.getparent()
+            if parent is not None:
+                parent.remove(container)
+
+        remove_xpaths = (
+            './/*[contains(concat(" ", normalize-space(@class), " "), " mw-editsection ")]',
+            './/*[contains(concat(" ", normalize-space(@class), " "), " mw-jump-link ")]',
+            './/*[contains(concat(" ", normalize-space(@class), " "), " navbox ")]',
+            './/*[contains(concat(" ", normalize-space(@class), " "), " printfooter ")]',
+            './/*[@id="toc"]',
+            ".//script",
+            ".//style",
+            ".//noscript",
+        )
+        for xpath in remove_xpaths:
+            for element in root.xpath(xpath):
+                parent = element.getparent()
+                if parent is not None:
+                    parent.remove(element)
+
+        # 典型侧边导航表：大量单单元格行。视觉数据表已单独还原，
+        # 这种目录表只会挤占正文预算。
+        if grids:
+            for table in root.xpath(".//table"):
+                rows = table.xpath("./tr|./tbody/tr|./thead/tr")
+                single_cell_rows = sum(
+                    len(row.xpath("./th|./td")) <= 1 for row in rows
+                )
+                if len(rows) >= 10 and single_cell_rows / len(rows) >= 0.8:
+                    parent = table.getparent()
+                    if parent is not None:
+                        parent.remove(table)
+
+        remaining_html = etree.tostring(
+            root,
+            encoding="unicode",
+            method="html",
+        )
+        parser = _HTMLToText()
+        parser.feed(remaining_html)
+        remaining = _clean_extracted_text(parser.get_text())
+        sections = []
+        if title:
+            sections.append("# " + title)
+        sections.extend(grids)
+        if remaining:
+            sections.append(remaining)
+        text = "\n\n".join(sections).strip()
+        if not text:
+            return None
+        if len(text) > _MAX_SCRAPE_CHARS:
+            text = text[:_MAX_SCRAPE_CHARS] + "\n\n...[正文内容已截断]"
+        return title[:300], text, "mediawiki"
+    except Exception as exc:
+        logger.info("mediawiki extraction fallback: %s", type(exc).__name__)
+        return None
+
+
 def _html_to_main_markdown(html: str) -> Tuple[str, str, str]:
     """Readability 先选正文节点，再转为轻量 Markdown。"""
     raw_html = str(html or "")
+    mediawiki = _mediawiki_main_markdown(raw_html)
+    if mediawiki is not None:
+        return mediawiki
     title_m = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.I | re.S)
     fallback_title = _strip_tags(title_m.group(1)) if title_m else ""
     # 先用不构建 DOM 的方式删除最容易膨胀的区域，既减少导航广告，也避免
