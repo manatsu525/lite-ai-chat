@@ -1999,6 +1999,13 @@
           error.textContent = event.error;
           eventContent.appendChild(error);
         }
+        if (event.warning) {
+          const warning = document.createElement("div");
+          warning.className = "trace-query";
+          warning.textContent =
+            event.warning + "；下方内容为搜索索引摘要，并非网页全文。";
+          eventContent.appendChild(warning);
+        }
         if (event.kind === "search") {
           const results = Array.isArray(event.results) ? event.results : [];
           if (!results.length && event.state !== "running" && !event.error) {

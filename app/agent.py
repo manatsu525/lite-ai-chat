@@ -72,7 +72,7 @@ def _system_prompt(budget: AgentBudget) -> str:
 1. 需要实时或外部信息时，调用 web_search。它是独立于当前模型的外部搜索服务。
 2. 每轮搜索后先判断结果是否真正回答了问题；若无关、不完整、互相冲突或缺少权威来源，不要仓促回答，要换一个明显不同且更精确的查询继续搜索。
 3. 改写查询时可加入准确年份、关键实体、官方域名或 site: 限定。最多进行 {budget.max_searches} 次 web_search，每次最多返回 {budget.max_search_results} 条结果；不要重复完全相同的查询。
-4. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。优先政府、学校、机构官网等一手来源。{tool_limit}
+4. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。优先政府、学校、机构官网等一手来源。若结果标记 partial 或 search_index_fallback，表示源站阻止抓取、当前只有搜索索引摘要；不得把它当作网页全文，也不能推断摘要未提及的细节。{tool_limit}
 5. 回答具体日期时，正文必须明确说明该日期对应用户所问事件；网页的“发布时间/更新时间”不能当成开学、放假等事件日期。若抓到的只是列表页、图片页或正文没有答案，应继续换查询搜索，不能猜测。
 6. 不要编造链接或事实；最终回答必须基于工具结果，并附上实际来源链接。达到搜索上限仍无可靠答案时，要如实说明未核实到。
 7. 使用与用户相同的语言回答。
@@ -379,6 +379,8 @@ async def _apply_tool_calls(
                 {"error": f"工具执行超过 {timeout:.0f} 秒，已停止"},
                 ensure_ascii=False,
             )
+        if name == "scrape_url":
+            result = _scrape_search_index_fallback(msgs, args, result)
         msgs.append(
             {
                 "role": "tool",
@@ -389,6 +391,74 @@ async def _apply_tool_calls(
         _enforce_tool_result_budget(msgs)
         events.append(_tool_trace_event(tc, result, state="done"))
     return events
+
+
+def _normalized_url(value: str) -> str:
+    return re.sub(r"[#?].*$", "", str(value or "")).rstrip("/").lower()
+
+
+def _scrape_search_index_fallback(
+    messages: List[dict],
+    arguments: Any,
+    result: str,
+) -> str:
+    """源站反爬时复用先前搜索摘要，避免把 403 当成唯一工具结果。"""
+    try:
+        payload = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return result
+    if not isinstance(payload, dict) or not payload.get("error"):
+        return result
+    try:
+        args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return result
+    target_url = str(args.get("url") or payload.get("url") or "")
+    normalized_target = _normalized_url(target_url)
+    if not normalized_target:
+        return result
+
+    for message in reversed(messages):
+        if message.get("role") != "tool":
+            continue
+        try:
+            search_payload = json.loads(message.get("content") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(search_payload, dict):
+            continue
+        for item in search_payload.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            if _normalized_url(item.get("url")) != normalized_target:
+                continue
+            title = str(item.get("title") or "")[:300]
+            snippet = str(
+                item.get("snippet") or item.get("key_point") or ""
+            )[:1000]
+            if not title and not snippet:
+                continue
+            warning = str(payload.get("error") or "")[:500]
+            markdown = (
+                "源站阻止了自动读取。以下内容来自此前搜索结果的索引摘要，"
+                "不是网页全文，不能据此推断摘要中未提及的细节。\n\n"
+            )
+            if title:
+                markdown += f"标题：{title}\n\n"
+            if snippet:
+                markdown += f"索引摘要：{snippet}"
+            return json.dumps(
+                {
+                    "url": target_url,
+                    "title": title,
+                    "markdown": markdown,
+                    "source": "search_index_fallback",
+                    "partial": True,
+                    "warning": warning,
+                },
+                ensure_ascii=False,
+            )
+    return result
 
 
 def _tool_arguments(tool_call: dict) -> dict:
@@ -450,6 +520,8 @@ def _tool_trace_event(
     if payload.get("error"):
         event["error"] = str(payload["error"])[:500]
         event["state"] = "error"
+    if payload.get("warning"):
+        event["warning"] = str(payload["warning"])[:500]
     if name == "web_search":
         event["source"] = str(payload.get("source") or "")[:100]
         event["results"] = [

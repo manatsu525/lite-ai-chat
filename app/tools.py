@@ -731,6 +731,26 @@ async def scrape_url(url: str) -> str:
 
     try:
         return await _builtin_scrape(url)
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code
+        if status_code in (401, 403, 407, 429, 451):
+            return json.dumps(
+                {
+                    "url": url,
+                    "error": f"源站返回 HTTP {status_code}，拒绝自动抓取",
+                    "status_code": status_code,
+                    "blocked": True,
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "url": url,
+                "error": f"网页请求失败（HTTP {status_code}）",
+                "status_code": status_code,
+            },
+            ensure_ascii=False,
+        )
     except Exception as e:
         return json.dumps({"error": f"抓取失败: {type(e).__name__}: {e}"}, ensure_ascii=False)
 
