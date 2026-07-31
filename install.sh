@@ -12,6 +12,7 @@ SEARXNG_IMAGE="searxng/searxng@sha256:5d6d903ab82afa56ee32792d477f36bc63d3e5ca04
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 APP_PORT="${APP_PORT:-$DEFAULT_APP_PORT}"
+TLS_HOST="${TLS_HOST:-}"
 GROQ_API_KEY="${GROQ_API_KEY:-}"
 DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
 
@@ -36,6 +37,10 @@ validate_inputs() {
   [[ "$INSTALL_DIR" != *$'\n'* && "$INSTALL_DIR" != *" "* ]] || fail "安装目录不能包含空格或换行。"
   [[ "$APP_PORT" =~ ^[0-9]+$ ]] || fail "APP_PORT 必须是数字。"
   (( APP_PORT >= 1 && APP_PORT <= 65535 )) || fail "APP_PORT 必须在 1-65535 之间。"
+  if [[ -n "$TLS_HOST" ]]; then
+    [[ "$TLS_HOST" =~ ^[A-Za-z0-9.-]+$ ]] ||
+      fail "TLS_HOST 只能是 IP 地址或普通域名。"
+  fi
   [[ -f "$SOURCE_DIR/app/main.py" ]] || fail "安装包不完整：缺少 app/main.py"
   [[ -f "$SOURCE_DIR/deploy/searxng/settings.yml" ]] || fail "安装包不完整：缺少 SearXNG 配置。"
 }
@@ -100,6 +105,70 @@ install_application_files() {
   "$INSTALL_DIR/.venv/bin/pip" install --disable-pip-version-check -r "$INSTALL_DIR/requirements.txt"
 }
 
+generate_tls_certificate() {
+  local tls_dir="$INSTALL_DIR/data/tls"
+  local tls_host="$TLS_HOST"
+  local san_type="DNS"
+  local check_option="-checkhost"
+
+  if [[ -z "$tls_host" ]]; then
+    tls_host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  tls_host="${tls_host:-127.0.0.1}"
+  [[ "$tls_host" =~ ^[A-Za-z0-9.-]+$ ]] ||
+    fail "无法安全地生成 TLS 证书：主机名格式无效。"
+  if [[ "$tls_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    san_type="IP"
+    check_option="-checkip"
+  fi
+
+  install -d -m 0700 "$tls_dir"
+  if [[ ! -s "$tls_dir/ca.crt" || ! -s "$tls_dir/ca.key" ]]; then
+    log "生成 Lite AI Chat 本机 CA。"
+    openssl req -x509 -new -nodes -newkey rsa:2048 -sha256 -days 3650 \
+      -keyout "$tls_dir/ca.key" \
+      -out "$tls_dir/ca.crt" \
+      -subj "/CN=Lite AI Chat Local CA" \
+      -extensions v3_ca >/dev/null 2>&1
+  fi
+
+  if [[
+    ! -s "$tls_dir/server.crt" ||
+    ! -s "$tls_dir/server.key"
+  ]] || ! openssl x509 -checkend 2592000 -noout \
+    -in "$tls_dir/server.crt" >/dev/null 2>&1 ||
+    ! openssl x509 "$check_option" "$tls_host" -noout \
+      -in "$tls_dir/server.crt" >/dev/null 2>&1; then
+    log "为 $tls_host 生成 HTTPS 服务器证书。"
+    openssl req -new -nodes -newkey rsa:2048 -sha256 \
+      -keyout "$tls_dir/server.key" \
+      -out "$tls_dir/server.csr" \
+      -subj "/CN=$tls_host" >/dev/null 2>&1
+    {
+      printf 'subjectKeyIdentifier=hash\n'
+      printf 'authorityKeyIdentifier=keyid,issuer\n'
+      printf 'basicConstraints=critical,CA:FALSE\n'
+      printf 'keyUsage=critical,digitalSignature,keyEncipherment\n'
+      printf 'extendedKeyUsage=serverAuth\n'
+      printf 'subjectAltName=%s:%s,IP:127.0.0.1,DNS:localhost\n' "$san_type" "$tls_host"
+    } >"$tls_dir/server.ext"
+    openssl x509 -req \
+      -in "$tls_dir/server.csr" \
+      -CA "$tls_dir/ca.crt" \
+      -CAkey "$tls_dir/ca.key" \
+      -CAcreateserial \
+      -out "$tls_dir/server.crt" \
+      -days 825 \
+      -sha256 \
+      -extfile "$tls_dir/server.ext" >/dev/null 2>&1
+    rm -f "$tls_dir/server.csr" "$tls_dir/server.ext" "$tls_dir/ca.srl"
+  else
+    log "保留现有 HTTPS 服务器证书。"
+  fi
+  chmod 0600 "$tls_dir/ca.key" "$tls_dir/server.key"
+  chmod 0644 "$tls_dir/ca.crt" "$tls_dir/server.crt"
+}
+
 set_env_value() {
   local file="$1"
   local key="$2"
@@ -116,6 +185,8 @@ write_environment() {
     set_env_value "$INSTALL_DIR/.env" MAX_TOOL_ROUNDS 10
     set_env_value "$INSTALL_DIR/.env" MAX_SEARCH_RESULTS 10
     set_env_value "$INSTALL_DIR/.env" LLM_TIMEOUT 1200
+    set_env_value "$INSTALL_DIR/.env" TLS_CERT_FILE "$INSTALL_DIR/data/tls/server.crt"
+    set_env_value "$INSTALL_DIR/.env" TLS_KEY_FILE "$INSTALL_DIR/data/tls/server.key"
     chmod 0600 "$INSTALL_DIR/.env"
     return
   fi
@@ -140,6 +211,8 @@ write_environment() {
     printf 'HOST=0.0.0.0\n'
     printf 'PORT=%s\n' "$APP_PORT"
     printf 'DATA_DIR=%s/data\n' "$INSTALL_DIR"
+    printf 'TLS_CERT_FILE=%s/data/tls/server.crt\n' "$INSTALL_DIR"
+    printf 'TLS_KEY_FILE=%s/data/tls/server.key\n' "$INSTALL_DIR"
   } >"$INSTALL_DIR/.env"
 }
 
@@ -199,12 +272,12 @@ EOF
 verify_installation() {
   local attempt
   for attempt in {1..20}; do
-    if curl -fsS --max-time 2 "http://127.0.0.1:$APP_PORT/health" >/dev/null; then
+    if curl -kfsS --max-time 2 "https://127.0.0.1:$APP_PORT/health" >/dev/null; then
       break
     fi
     sleep 1
   done
-  curl -fsS --max-time 5 "http://127.0.0.1:$APP_PORT/health" >/dev/null ||
+  curl -kfsS --max-time 5 "https://127.0.0.1:$APP_PORT/health" >/dev/null ||
     fail "应用健康检查失败。请运行：journalctl -u $SERVICE_NAME -n 100"
 
   # SearXNG 首次启动会更新 CA 证书并初始化引擎，通常比应用更慢。
@@ -229,6 +302,7 @@ main() {
   install_dependencies
   read_secret_if_needed
   install_application_files
+  generate_tls_certificate
   write_environment
   install_search_service
   install_systemd_service
@@ -237,7 +311,8 @@ main() {
   local server_ip
   server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   log "安装完成。"
-  printf '访问地址：http://%s:%s\n' "${server_ip:-服务器IP}" "$APP_PORT"
+  printf '访问地址：https://%s:%s\n' "${TLS_HOST:-${server_ip:-服务器IP}}" "$APP_PORT"
+  printf '首次访问会出现自签证书警告；可将 %s/data/tls/ca.crt 安装为受信任 CA。\n' "$INSTALL_DIR"
   printf '首次打开页面时创建管理员账号。\n'
 }
 

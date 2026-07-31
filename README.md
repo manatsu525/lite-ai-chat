@@ -19,6 +19,7 @@
 - 首次访问创建管理员账号，此后关闭公开注册
 - 管理员可在网页新增/删除普通账号，总账号数最多 3 个
 - 普通账号无管理入口；各账号的对话、后台任务和登录权限相互隔离
+- 内置低开销 HTTPS，自行生成本机 CA 和带 IP/DNS SAN 的服务器证书
 - 单进程 FastAPI，适合小内存 Debian/Ubuntu VPS
 - 安装服务仅开放聊天端口；SearXNG 只监听 `127.0.0.1:8888`
 
@@ -38,7 +39,7 @@ cd lite-ai-chat
 sudo bash install.sh
 ```
 
-安装过程中会隐藏输入 Groq、DeepSeek API Key，两者均可留空，但至少配置一个才能正常聊天。默认访问端口为 `8000`。
+安装过程中会隐藏输入 Groq、DeepSeek API Key，两者均可留空，但至少配置一个才能正常聊天。默认 HTTPS 端口为 `8000`。
 
 也可以非交互安装：
 
@@ -46,16 +47,25 @@ sudo bash install.sh
 sudo GROQ_API_KEY='gsk_xxx' \
   DEEPSEEK_API_KEY='sk_xxx' \
   APP_PORT=8000 \
+  TLS_HOST='服务器公网 IP 或域名' \
   bash install.sh
 ```
 
 安装完成后访问：
 
 ```text
-http://服务器IP:8000
+https://服务器IP:8000
 ```
 
 第一次打开页面时创建管理员账号。
+
+安装脚本会在 `data/tls/` 中生成一个本机 CA 和由其签发的服务器证书。首次访问会看到自签证书警告，可以临时选择继续访问；若希望长期消除警告，请只把 `/opt/lite-ai-chat/data/tls/ca.crt` 安装到手机或电脑的受信任 CA，切勿复制 `ca.key` 或 `server.key`。Android 通常在“安全 → 加密与凭据 → 安装 CA 证书”，iOS/iPadOS 安装描述文件后还需在“关于本机 → 证书信任设置”中启用完全信任。
+
+证书会包含安装时检测到的服务器 IP；若机器有多个地址或使用域名，请通过 `TLS_HOST` 明确指定：
+
+```bash
+sudo TLS_HOST=66.59.198.186 bash install.sh
+```
 
 管理员登录后可点击右上角“账号管理”创建另外两个普通账号。删除普通账号会立即使其现有登录失效，并同时删除该账号的对话历史和后台任务。API Key 与可用模型由管理员统一配置，普通账号只能选择已配置模型，不能读取或修改密钥。
 
@@ -142,6 +152,7 @@ sudo bash uninstall.sh --purge
 ## 安全提示
 
 - 不要提交 `.env`、数据库或真实 API Key。
-- 建议使用防火墙限制聊天端口，或通过 Nginx/Caddy 配置 HTTPS。
+- HTTPS 由现有 Uvicorn 进程直接提供，不额外运行 Nginx/Caddy；仍建议用防火墙限制聊天端口。
+- 只分发 `ca.crt`，绝不要把 `data/tls/` 中的任何私钥复制到客户端。
 - SearXNG 默认仅绑定本机，切勿无认证直接暴露到公网。
 - 如果服务器已经被公网扫描，建议更换强管理员密码并启用 HTTPS。

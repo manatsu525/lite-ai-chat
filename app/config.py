@@ -224,3 +224,5 @@ LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "1200"))
 # 服务
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
+TLS_CERT_FILE = os.getenv("TLS_CERT_FILE", "").strip()
+TLS_KEY_FILE = os.getenv("TLS_KEY_FILE", "").strip()
