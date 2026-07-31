@@ -8,6 +8,7 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import date
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
@@ -27,20 +28,59 @@ _MAX_TOOL_RESULT_CHARS = 60000
 _RECENT_CONVERSATION_ROUNDS = 10
 _OLDER_HISTORY_SUMMARY_CHARS = 6000
 
-SYSTEM_PROMPT = f"""你是一个有用的 AI 助手，可以使用工具获取最新网络信息。
+
+@dataclass(frozen=True)
+class AgentBudget:
+    max_tool_rounds: int
+    max_tool_calls: Optional[int]
+    max_searches: int
+    max_search_results: int
+    max_scrapes: int
+
+
+_DEEP_BUDGET = AgentBudget(
+    max_tool_rounds=MAX_TOOL_ROUNDS,
+    max_tool_calls=None,
+    max_searches=_MAX_EXTERNAL_SEARCHES,
+    max_search_results=10,
+    max_scrapes=_MAX_EXTERNAL_SCRAPES,
+)
+_NORMAL_BUDGET = AgentBudget(
+    max_tool_rounds=min(MAX_TOOL_ROUNDS, 6),
+    max_tool_calls=6,
+    max_searches=3,
+    max_search_results=5,
+    max_scrapes=_MAX_EXTERNAL_SCRAPES,
+)
+
+
+def _budget_for(reasoning_depth: str) -> AgentBudget:
+    return _NORMAL_BUDGET if reasoning_depth == "normal" else _DEEP_BUDGET
+
+
+def _system_prompt(budget: AgentBudget) -> str:
+    tool_limit = (
+        f"所有工具累计最多调用 {budget.max_tool_calls} 次。"
+        if budget.max_tool_calls is not None
+        else ""
+    )
+    return f"""你是一个有用的 AI 助手，可以使用工具获取最新网络信息。
 
 当前日期：{date.today().isoformat()}。
 
 工具使用原则：
 1. 需要实时或外部信息时，调用 web_search。它是独立于当前模型的外部搜索服务。
 2. 每轮搜索后先判断结果是否真正回答了问题；若无关、不完整、互相冲突或缺少权威来源，不要仓促回答，要换一个明显不同且更精确的查询继续搜索。
-3. 改写查询时可加入准确年份、关键实体、官方域名或 site: 限定。最多进行 {_MAX_EXTERNAL_SEARCHES} 次 web_search；不要重复完全相同的查询。
-4. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {_MAX_EXTERNAL_SCRAPES} 个网页。优先政府、学校、机构官网等一手来源。
+3. 改写查询时可加入准确年份、关键实体、官方域名或 site: 限定。最多进行 {budget.max_searches} 次 web_search，每次最多返回 {budget.max_search_results} 条结果；不要重复完全相同的查询。
+4. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。优先政府、学校、机构官网等一手来源。{tool_limit}
 5. 回答具体日期时，正文必须明确说明该日期对应用户所问事件；网页的“发布时间/更新时间”不能当成开学、放假等事件日期。若抓到的只是列表页、图片页或正文没有答案，应继续换查询搜索，不能猜测。
 6. 不要编造链接或事实；最终回答必须基于工具结果，并附上实际来源链接。达到搜索上限仍无可靠答案时，要如实说明未核实到。
 7. 使用与用户相同的语言回答。
 8. 只通过 API 的 function calling 调用工具，不要输出 XML 或伪代码。
 9. “今年”“今天”等相对日期必须以上面的当前日期为准。"""
+
+
+SYSTEM_PROMPT = _system_prompt(_DEEP_BUDGET)
 
 
 def _llm_round_timeout(_model: str) -> float:
@@ -133,7 +173,10 @@ def _compact_conversation_history(messages: List[dict]) -> List[dict]:
     return compacted
 
 
-def _normalize_messages(messages: List[dict]) -> List[dict]:
+def _normalize_messages(
+    messages: List[dict],
+    system_prompt: str = SYSTEM_PROMPT,
+) -> List[dict]:
     """确保有 system 提示，并清理 Groq 不喜欢的字段。"""
     out = []
     for m in messages:
@@ -145,9 +188,9 @@ def _normalize_messages(messages: List[dict]) -> List[dict]:
         out.append(item)
     out = _compact_conversation_history(out)
     if not any(m.get("role") == "system" for m in out):
-        out.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
-    elif not any((m.get("content") or "") == SYSTEM_PROMPT for m in out):
-        out.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+        out.insert(0, {"role": "system", "content": system_prompt})
+    elif not any((m.get("content") or "") == system_prompt for m in out):
+        out.insert(0, {"role": "system", "content": system_prompt})
     return out
 
 
@@ -287,8 +330,27 @@ async def _apply_tool_calls(
     msgs: List[dict],
     tool_calls: List[dict],
     assistant_message: Optional[dict] = None,
+    max_search_results: int = 10,
 ) -> List[str]:
     """把 assistant tool_calls + tool 结果追加到 msgs，返回工具名列表。"""
+    # 模型可能主动请求 10 条；普通思考模式必须在执行层强制压到 5 条。
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        if fn.get("name") != "web_search":
+            continue
+        raw_args = fn.get("arguments") or "{}"
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        requested = args.get("num_results", max_search_results)
+        try:
+            requested = int(requested)
+        except (TypeError, ValueError):
+            requested = max_search_results
+        args["num_results"] = max(1, min(requested, max_search_results))
+        fn["arguments"] = json.dumps(args, ensure_ascii=False)
+
     names = []
     assistant = {
         "role": "assistant",
@@ -425,12 +487,21 @@ def _limit_external_tools(
     tool_calls: List[dict],
     searches_used: int,
     scrapes_used: int,
+    tool_calls_used: int,
+    budget: AgentBudget,
 ) -> List[dict]:
-    """每个回答最多五次搜索、五次网页正文抓取。"""
-    searches_remaining = max(0, _MAX_EXTERNAL_SEARCHES - searches_used)
-    scrapes_remaining = max(0, _MAX_EXTERNAL_SCRAPES - scrapes_used)
+    """按当前思考深度强制裁剪搜索、抓取和工具调用总数。"""
+    searches_remaining = max(0, budget.max_searches - searches_used)
+    scrapes_remaining = max(0, budget.max_scrapes - scrapes_used)
+    calls_remaining = (
+        len(tool_calls)
+        if budget.max_tool_calls is None
+        else max(0, budget.max_tool_calls - tool_calls_used)
+    )
     kept = []
     for tc in tool_calls:
+        if calls_remaining <= 0:
+            break
         name = (tc.get("function") or {}).get("name")
         if name == "web_search":
             if searches_remaining <= 0:
@@ -441,13 +512,23 @@ def _limit_external_tools(
                 continue
             scrapes_remaining -= 1
         kept.append(tc)
+        calls_remaining -= 1
     return kept
 
 
-def _should_refine_search(content: str, search_calls: int) -> bool:
+def _should_refine_search(
+    content: str,
+    search_calls: int,
+    tool_calls_used: int,
+    budget: AgentBudget,
+) -> bool:
     """模型准备以“没查到”收尾时，若还有额度则要求改写查询继续检索。"""
     return (
-        0 < search_calls < _MAX_EXTERNAL_SEARCHES
+        0 < search_calls < budget.max_searches
+        and (
+            budget.max_tool_calls is None
+            or tool_calls_used < budget.max_tool_calls
+        )
         and bool(_UNCERTAIN_FINAL_RE.search(content or ""))
     )
 
@@ -508,10 +589,15 @@ async def _resolve_round(
     return message, tool_calls, None
 
 
-async def run_agent_stream(messages: List[dict], model: Optional[str] = None) -> AsyncIterator[str]:
+async def run_agent_stream(
+    messages: List[dict],
+    model: Optional[str] = None,
+    reasoning_depth: str = "deep",
+) -> AsyncIterator[str]:
     use_model = model or MODEL_NAME
+    budget = _budget_for(reasoning_depth)
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    msgs = _normalize_messages(messages)
+    msgs = _normalize_messages(messages, _system_prompt(budget))
 
     if not get_model_config(use_model):
         yield _sse(_chunk(content="错误: 所选模型未配置或不可用", finish_reason="stop", model=use_model, cid=cid))
@@ -526,7 +612,8 @@ async def run_agent_stream(messages: List[dict], model: Optional[str] = None) ->
     seen_tool_calls = set()
     search_calls = 0
     scrape_calls = 0
-    for round_i in range(MAX_TOOL_ROUNDS + 1):
+    tool_calls_used = 0
+    for round_i in range(budget.max_tool_rounds + 1):
         # 上游偶尔会长时间不返回；等待期间持续发 SSE 心跳，并设置整轮硬上限。
         resolve_task = asyncio.create_task(_resolve_round(msgs, use_model))
         started = time.monotonic()
@@ -563,7 +650,7 @@ async def run_agent_stream(messages: List[dict], model: Optional[str] = None) ->
             yield "data: [DONE]\n\n"
             return
 
-        if tool_calls and round_i < MAX_TOOL_ROUNDS:
+        if tool_calls and round_i < budget.max_tool_rounds:
             new_tool_calls = [
                 tc for tc in tool_calls if _tool_signature(tc) not in seen_tool_calls
             ]
@@ -571,6 +658,8 @@ async def run_agent_stream(messages: List[dict], model: Optional[str] = None) ->
                 new_tool_calls,
                 search_calls,
                 scrape_calls,
+                tool_calls_used,
+                budget,
             )
             if not new_tool_calls:
                 logger.warning("repeated/excess tool call stopped at round %s", round_i + 1)
@@ -599,6 +688,7 @@ async def run_agent_stream(messages: List[dict], model: Optional[str] = None) ->
                 return
 
             tool_calls = new_tool_calls
+            tool_calls_used += len(tool_calls)
             search_calls += sum(
                 1
                 for tc in tool_calls
@@ -625,7 +715,12 @@ async def run_agent_stream(messages: List[dict], model: Optional[str] = None) ->
             }
             yield _sse(running)
 
-            await _apply_tool_calls(msgs, tool_calls, message)
+            await _apply_tool_calls(
+                msgs,
+                tool_calls,
+                message,
+                budget.max_search_results,
+            )
 
             done = _chunk(model=use_model, cid=cid)
             done["status"] = {"type": "tool_done", "tools": names, "round": round_i + 1}
@@ -633,14 +728,22 @@ async def run_agent_stream(messages: List[dict], model: Optional[str] = None) ->
             continue
 
         # 达上限仍想调工具：执行最后一轮工具后强制总结
-        if tool_calls and round_i >= MAX_TOOL_ROUNDS:
+        if tool_calls and round_i >= budget.max_tool_rounds:
             tool_calls = _limit_external_tools(
                 tool_calls,
                 search_calls,
                 scrape_calls,
+                tool_calls_used,
+                budget,
             )
             if tool_calls:
-                await _apply_tool_calls(msgs, tool_calls, message)
+                tool_calls_used += len(tool_calls)
+                await _apply_tool_calls(
+                    msgs,
+                    tool_calls,
+                    message,
+                    budget.max_search_results,
+                )
             msgs.append(
                 {
                     "role": "user",
@@ -660,7 +763,12 @@ async def run_agent_stream(messages: List[dict], model: Optional[str] = None) ->
         # 正常文本回答
         final_content = (message or {}).get("content") or ""
         if final_content:
-            if _should_refine_search(final_content, search_calls):
+            if _should_refine_search(
+                final_content,
+                search_calls,
+                tool_calls_used,
+                budget,
+            ):
                 msgs.append({"role": "assistant", "content": final_content})
                 msgs.append(
                     {
@@ -761,9 +869,14 @@ async def _call_llm_final_stream(messages: List[dict], model: str, cid: str) -> 
             yield "data: [DONE]\n\n"
 
 
-async def run_agent_sync(messages: List[dict], model: Optional[str] = None) -> dict:
+async def run_agent_sync(
+    messages: List[dict],
+    model: Optional[str] = None,
+    reasoning_depth: str = "deep",
+) -> dict:
     use_model = model or MODEL_NAME
-    msgs = _normalize_messages(messages)
+    budget = _budget_for(reasoning_depth)
+    msgs = _normalize_messages(messages, _system_prompt(budget))
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
     if not get_model_config(use_model):
@@ -771,16 +884,19 @@ async def run_agent_sync(messages: List[dict], model: Optional[str] = None) -> d
 
     search_calls = 0
     scrape_calls = 0
-    for round_i in range(MAX_TOOL_ROUNDS + 1):
+    tool_calls_used = 0
+    for round_i in range(budget.max_tool_rounds + 1):
         message, tool_calls, err = await _resolve_round(msgs, use_model)
         if err:
             return _completion_obj(cid, use_model, f"[上游模型错误] {err}")
 
-        if tool_calls and round_i < MAX_TOOL_ROUNDS:
+        if tool_calls and round_i < budget.max_tool_rounds:
             tool_calls = _limit_external_tools(
                 tool_calls,
                 search_calls,
                 scrape_calls,
+                tool_calls_used,
+                budget,
             )
             if not tool_calls:
                 msgs.append(
@@ -795,6 +911,7 @@ async def run_agent_sync(messages: List[dict], model: Optional[str] = None) -> d
                     return _completion_obj(cid, use_model, f"[最终回答错误] {e}")
                 content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
                 return _completion_obj(cid, use_model, content)
+            tool_calls_used += len(tool_calls)
             search_calls += sum(
                 1
                 for tc in tool_calls
@@ -805,17 +922,30 @@ async def run_agent_sync(messages: List[dict], model: Optional[str] = None) -> d
                 for tc in tool_calls
                 if (tc.get("function") or {}).get("name") == "scrape_url"
             )
-            await _apply_tool_calls(msgs, tool_calls, message)
+            await _apply_tool_calls(
+                msgs,
+                tool_calls,
+                message,
+                budget.max_search_results,
+            )
             continue
 
-        if tool_calls and round_i >= MAX_TOOL_ROUNDS:
+        if tool_calls and round_i >= budget.max_tool_rounds:
             tool_calls = _limit_external_tools(
                 tool_calls,
                 search_calls,
                 scrape_calls,
+                tool_calls_used,
+                budget,
             )
             if tool_calls:
-                await _apply_tool_calls(msgs, tool_calls, message)
+                tool_calls_used += len(tool_calls)
+                await _apply_tool_calls(
+                    msgs,
+                    tool_calls,
+                    message,
+                    budget.max_search_results,
+                )
             msgs.append(
                 {
                     "role": "user",
@@ -830,7 +960,12 @@ async def run_agent_sync(messages: List[dict], model: Optional[str] = None) -> d
             return _completion_obj(cid, use_model, content)
 
         content = (message or {}).get("content") or ""
-        if _should_refine_search(content, search_calls):
+        if _should_refine_search(
+            content,
+            search_calls,
+            tool_calls_used,
+            budget,
+        ):
             msgs.append({"role": "assistant", "content": content})
             msgs.append(
                 {

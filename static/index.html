@@ -134,10 +134,22 @@
     }
     header .brand { font-weight: 700; letter-spacing: 0.02em; }
     header .user-meta { color: var(--muted); font-size: 0.85rem; display: flex; gap: 0.6rem; align-items: center; }
+    .model-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      min-width: 0;
+    }
     #model-select {
       width: auto;
       min-width: 190px;
       padding: 0.5rem 2rem 0.5rem 0.7rem;
+      color: var(--text);
+    }
+    #reasoning-depth {
+      width: auto;
+      min-width: 104px;
+      padding: 0.5rem 1.8rem 0.5rem 0.65rem;
       color: var(--text);
     }
     .session-bar {
@@ -190,14 +202,27 @@
         font-size: 0.7rem;
       }
       #who { display: none; }
-      #model-select {
+      .model-controls {
         grid-column: 1 / -1;
         width: 100%;
+        gap: 0.3rem;
+      }
+      #model-select {
+        flex: 1;
+        width: 0;
         min-width: 0;
         max-width: none;
         height: 2rem;
         padding: 0.25rem 1.55rem 0.25rem 0.5rem;
         font-size: 0.78rem;
+      }
+      #reasoning-depth {
+        flex: 0 0 6.2rem;
+        width: 6.2rem;
+        min-width: 0;
+        height: 2rem;
+        padding: 0.25rem 1.35rem 0.25rem 0.4rem;
+        font-size: 0.72rem;
       }
       header .user-meta button {
         min-height: 1.85rem;
@@ -626,7 +651,13 @@
     <header>
       <div class="brand">Lite AI Chat</div>
       <div class="user-meta">
-        <select id="model-select" aria-label="选择模型" title="选择模型"></select>
+        <div class="model-controls">
+          <select id="model-select" aria-label="选择模型" title="选择模型"></select>
+          <select id="reasoning-depth" aria-label="思考深度" title="选择思考深度">
+            <option value="normal">普通思考</option>
+            <option value="deep">深度思考</option>
+          </select>
+        </div>
         <span id="who"></span>
         <button class="ghost" id="settings-btn" type="button">API / 模型</button>
         <button class="ghost" id="admin-btn" type="button" style="display:none">账号管理</button>
@@ -745,6 +776,7 @@
     const TOKEN_KEY = "lite_ai_token";
     const USER_KEY = "lite_ai_user";
     const MODEL_KEY = "lite_ai_model";
+    const REASONING_DEPTH_KEY = "lite_ai_reasoning_depth";
     let history = []; // {role, content}
     let busy = false;
     let isBootstrap = false;
@@ -876,6 +908,12 @@
 
     $("model-select").addEventListener("change", (e) => {
       localStorage.setItem(MODEL_KEY, e.target.value);
+    });
+    const savedReasoningDepth = localStorage.getItem(REASONING_DEPTH_KEY);
+    $("reasoning-depth").value =
+      savedReasoningDepth === "normal" ? "normal" : "deep";
+    $("reasoning-depth").addEventListener("change", (e) => {
+      localStorage.setItem(REASONING_DEPTH_KEY, e.target.value);
     });
 
     function newConversationId() {
@@ -1932,6 +1970,7 @@
       $("attach-btn").disabled = value;
       $("file-input").disabled = value;
       $("model-select").disabled = value;
+      $("reasoning-depth").disabled = value;
       $("conversation-select").disabled = value;
       $("history-prev").disabled = value || conversationPage <= 1;
       $("history-next").disabled =
@@ -2076,6 +2115,7 @@
           method: "POST",
           body: JSON.stringify({
             model: $("model-select").value || null,
+            reasoning_depth: $("reasoning-depth").value || "deep",
             messages: history.map((m) => ({ role: m.role, content: m.content })),
             conversation_id: currentConversationId,
             title: currentTitle(),

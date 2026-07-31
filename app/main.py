@@ -9,7 +9,7 @@ from contextlib import suppress
 import logging
 from pathlib import Path
 import re
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 from urllib.parse import urlparse
 import uuid
 
@@ -150,6 +150,7 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     # 忽略多余字段（tools 等由后端内置）
     max_tokens: Optional[int] = None
+    reasoning_depth: Literal["normal", "deep"] = "deep"
 
 
 class ChatJobBody(BaseModel):
@@ -158,6 +159,7 @@ class ChatJobBody(BaseModel):
     conversation_id: str = Field(min_length=8, max_length=64)
     title: str = Field(default="新对话", max_length=100)
     attachment_ids: List[str] = Field(default_factory=list, max_length=10)
+    reasoning_depth: Literal["normal", "deep"] = "deep"
 
 
 class ProviderBody(BaseModel):
@@ -695,6 +697,7 @@ async def create_chat_job(body: ChatJobBody, user: dict = Depends(require_user))
         clean,
         model,
         attachment_records,
+        body.reasoning_depth,
     )
 
 
@@ -742,7 +745,11 @@ async def chat_completions(body: ChatRequest, user: dict = Depends(require_user)
     if body.stream:
         async def gen():
             # 逐块 yield，配合 X-Accel-Buffering 避免中间层缓冲
-            async for chunk in run_agent_stream(clean, model=model):
+            async for chunk in run_agent_stream(
+                clean,
+                model=model,
+                reasoning_depth=body.reasoning_depth,
+            ):
                 yield chunk
 
         return StreamingResponse(
@@ -755,7 +762,11 @@ async def chat_completions(body: ChatRequest, user: dict = Depends(require_user)
             },
         )
 
-    result = await run_agent_sync(clean, model=model)
+    result = await run_agent_sync(
+        clean,
+        model=model,
+        reasoning_depth=body.reasoning_depth,
+    )
     return JSONResponse(result)
 
 

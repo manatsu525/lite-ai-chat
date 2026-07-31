@@ -59,6 +59,7 @@ async def _run_job(
     messages: List[dict],
     model: str,
     attachment_records: List[dict],
+    reasoning_depth: str,
 ) -> None:
     content = ""
     status_message = "思考中…"
@@ -79,7 +80,11 @@ async def _run_job(
                 messages,
                 attachment_records,
             )
-        async for frame in run_agent_stream(model_messages, model=model):
+        async for frame in run_agent_stream(
+            model_messages,
+            model=model,
+            reasoning_depth=reasoning_depth,
+        ):
             for line in frame.splitlines():
                 if not line.startswith("data: "):
                     continue
@@ -165,6 +170,7 @@ async def start_job(
     messages: List[dict],
     model: str,
     attachment_records: Optional[List[dict]] = None,
+    reasoning_depth: str = "deep",
 ) -> dict:
     attachment_records = attachment_records or []
     async with _start_lock:
@@ -182,6 +188,7 @@ async def start_job(
                 messages,
                 model,
                 attachment_records,
+                reasoning_depth,
             )
         )
         _tasks[job_id] = task
@@ -189,6 +196,7 @@ async def start_job(
             "id": job_id,
             "conversation_id": conversation_id,
             "model": model,
+            "reasoning_depth": reasoning_depth,
             "status": "queued",
             "content": "",
             "status_message": "已提交，等待运行…",
