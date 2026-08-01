@@ -49,6 +49,9 @@ class AgentBudget:
     max_searches: int
     max_search_results: int
     max_scrapes: int
+    max_tools_per_round: Optional[int] = None
+    max_searches_per_round: Optional[int] = None
+    max_scrapes_per_round: Optional[int] = None
 
 
 @dataclass
@@ -124,11 +127,14 @@ _DEEP_BUDGET = AgentBudget(
     max_scrapes=_MAX_EXTERNAL_SCRAPES,
 )
 _NORMAL_BUDGET = AgentBudget(
-    max_tool_rounds=min(MAX_TOOL_ROUNDS, 6),
-    max_tool_calls=6,
-    max_searches=3,
-    max_search_results=5,
-    max_scrapes=_MAX_EXTERNAL_SCRAPES,
+    max_tool_rounds=min(MAX_TOOL_ROUNDS, 8),
+    max_tool_calls=8,
+    max_searches=4,
+    max_search_results=10,
+    max_scrapes=4,
+    max_tools_per_round=1,
+    max_searches_per_round=1,
+    max_scrapes_per_round=1,
 )
 
 
@@ -142,6 +148,20 @@ def _system_prompt(budget: AgentBudget) -> str:
         if budget.max_tool_calls is not None
         else ""
     )
+    per_round_limit = ""
+    if (
+        budget.max_tools_per_round is not None
+        or
+        budget.max_searches_per_round is not None
+        or budget.max_scrapes_per_round is not None
+    ):
+        if budget.max_tools_per_round == 1:
+            per_round_limit = "每个工具轮最多执行 1 个动作：web_search 或 scrape_url 二选一。"
+        else:
+            per_round_limit = (
+                f"每个工具轮最多调用 web_search {budget.max_searches_per_round or 0} 次、"
+                f"scrape_url {budget.max_scrapes_per_round or 0} 次。"
+            )
     return f"""你是一个有用的 AI 助手，可以使用工具获取最新网络信息。
 
 当前日期：{date.today().isoformat()}。
@@ -150,7 +170,7 @@ def _system_prompt(budget: AgentBudget) -> str:
 1. 需要实时或外部信息时，调用 web_search。它是独立于当前模型的外部搜索服务。
 2. 每轮搜索后先判断结果是否真正回答了问题；若无关、不完整、互相冲突或缺少权威来源，不要仓促回答，要换一个明显不同且更精确的查询继续搜索。
 3. 用户用中文提问且问题属于科技、科学、产品、国际事件等通用主题时，搜索计划必须尽量同时包含独立的中文查询和英文查询：把核心实体与问题真正翻译成英文再搜，不能只在中文关键词后添加“English”。如果已有结果全部来自中文网站，在额度允许时应补一次英文查询。中国本地天气、国内法规政策、具体国内办事信息等强本地问题不强制英文搜索。
-4. 改写查询时可加入准确年份、关键实体、官方域名或 site: 限定。最多进行 {budget.max_searches} 次 web_search，每次最多返回 {budget.max_search_results} 条结果；中英文查询共享这些上限，不要重复完全相同的查询。
+4. 改写查询时可加入准确年份、关键实体、官方域名或 site: 限定。最多进行 {budget.max_searches} 次 web_search，每次最多返回 {budget.max_search_results} 条结果；中英文查询共享这些上限，不要重复完全相同的查询。{per_round_limit}
 5. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。不要只抓中文结果：对于通用主题，在可用结果中至少尝试一条相关的英文官网、英文文档或其他英文可靠来源，并与中文来源交叉参考。优先政府、学校、机构官网等一手来源；同等信息下避开知乎、百度搜索、百度贴吧、抖音、头条、小红书、什么值得买等已经实测会要求验证、拒绝 VPS 访问或只返回 JavaScript 空壳的站点，改选搜索结果中可公开读取的来源。百度百科、百度文库等未被固定屏蔽的百度子站仍应正常尝试读取。抓取器可能只在请求 URL 所属的同一轮搜索结果内自动换源；必须以 resolved_url 作为正文实际来源和引用地址，不能把正文归到 requested_url，也不要再次抓取已经返回的 resolved_url。若结果标记 partial、readable=false 或 error，表示没有取得新的网页正文；不得把它当作全文，也不能推断未提供的细节。此类失败抓取不占抓取及工具调用配额，应在还有工具轮数时改抓其他相关搜索结果。{tool_limit}
 6. 回答具体日期时，正文必须明确说明该日期对应用户所问事件；网页的“发布时间/更新时间”不能当成开学、放假等事件日期。若抓到的只是列表页、图片页或正文没有答案，应继续换查询搜索，不能猜测。
 7. 不要编造链接或事实；最终回答必须基于工具结果，并附上实际来源链接。达到搜索上限仍无可靠答案时，要如实说明未核实到。
@@ -456,7 +476,7 @@ async def _apply_tool_calls(
 ) -> List[dict]:
     """把工具结果加入模型上下文，并返回适合前端展示的精简事件。"""
     active_scrape_state = scrape_state or ScrapeRunState()
-    # 模型可能主动请求 10 条；普通思考模式必须在执行层强制压到 5 条。
+    # 模型可能主动请求更多结果；执行层按当前思考深度强制裁剪。
     for tc in tool_calls:
         fn = tc.get("function") or {}
         if fn.get("name") != "web_search":
@@ -1305,19 +1325,40 @@ def _limit_external_tools(
         else max(0, budget.max_tool_calls - tool_calls_used)
     )
     kept = []
+    round_tools = 0
+    round_searches = 0
+    round_scrapes = 0
     for tc in tool_calls:
         if calls_remaining <= 0:
+            break
+        if (
+            budget.max_tools_per_round is not None
+            and round_tools >= budget.max_tools_per_round
+        ):
             break
         name = (tc.get("function") or {}).get("name")
         if name == "web_search":
             if searches_remaining <= 0:
                 continue
+            if (
+                budget.max_searches_per_round is not None
+                and round_searches >= budget.max_searches_per_round
+            ):
+                continue
             searches_remaining -= 1
+            round_searches += 1
         elif name == "scrape_url":
             if scrapes_remaining <= 0:
                 continue
+            if (
+                budget.max_scrapes_per_round is not None
+                and round_scrapes >= budget.max_scrapes_per_round
+            ):
+                continue
             scrapes_remaining -= 1
+            round_scrapes += 1
         kept.append(tc)
+        round_tools += 1
         calls_remaining -= 1
     return kept
 
