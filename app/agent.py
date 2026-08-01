@@ -8,7 +8,7 @@ import logging
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -51,6 +51,14 @@ class AgentBudget:
     max_scrapes: int
 
 
+@dataclass
+class ScrapeRunState:
+    """仅存在于当前回答执行期，不写入模型上下文的网页去重状态。"""
+
+    attempted_urls: set = field(default_factory=set)
+    injected_urls: set = field(default_factory=set)
+
+
 _DEEP_BUDGET = AgentBudget(
     max_tool_rounds=MAX_TOOL_ROUNDS,
     max_tool_calls=None,
@@ -86,7 +94,7 @@ def _system_prompt(budget: AgentBudget) -> str:
 2. 每轮搜索后先判断结果是否真正回答了问题；若无关、不完整、互相冲突或缺少权威来源，不要仓促回答，要换一个明显不同且更精确的查询继续搜索。
 3. 用户用中文提问且问题属于科技、科学、产品、国际事件等通用主题时，搜索计划必须尽量同时包含独立的中文查询和英文查询：把核心实体与问题真正翻译成英文再搜，不能只在中文关键词后添加“English”。如果已有结果全部来自中文网站，在额度允许时应补一次英文查询。中国本地天气、国内法规政策、具体国内办事信息等强本地问题不强制英文搜索。
 4. 改写查询时可加入准确年份、关键实体、官方域名或 site: 限定。最多进行 {budget.max_searches} 次 web_search，每次最多返回 {budget.max_search_results} 条结果；中英文查询共享这些上限，不要重复完全相同的查询。
-5. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。不要只抓中文结果：对于通用主题，在可用结果中至少尝试一条相关的英文官网、英文文档或其他英文可靠来源，并与中文来源交叉参考。优先政府、学校、机构官网等一手来源；同等信息下避开知乎、百度搜索、百度贴吧、抖音、头条、小红书、什么值得买等已经实测会要求验证、拒绝 VPS 访问或只返回 JavaScript 空壳的站点，改选搜索结果中可公开读取的来源。百度百科、百度文库等未被固定屏蔽的百度子站仍应正常尝试读取。若结果标记 partial 或 search_index_fallback，表示源站阻止抓取、当前只有搜索索引摘要；不得把它当作网页全文，也不能推断摘要未提及的细节。此类失败抓取不占抓取及工具调用配额，应在还有工具轮数时改抓其他相关搜索结果。{tool_limit}
+5. 找到关键结果后，可用 scrape_url 阅读具体页面，每个回答最多深入抓取 {budget.max_scrapes} 个网页。不要只抓中文结果：对于通用主题，在可用结果中至少尝试一条相关的英文官网、英文文档或其他英文可靠来源，并与中文来源交叉参考。优先政府、学校、机构官网等一手来源；同等信息下避开知乎、百度搜索、百度贴吧、抖音、头条、小红书、什么值得买等已经实测会要求验证、拒绝 VPS 访问或只返回 JavaScript 空壳的站点，改选搜索结果中可公开读取的来源。百度百科、百度文库等未被固定屏蔽的百度子站仍应正常尝试读取。抓取器可能只在请求 URL 所属的同一轮搜索结果内自动换源；必须以 resolved_url 作为正文实际来源和引用地址，不能把正文归到 requested_url，也不要再次抓取已经返回的 resolved_url。若结果标记 partial、readable=false 或 error，表示没有取得新的网页正文；不得把它当作全文，也不能推断未提供的细节。此类失败抓取不占抓取及工具调用配额，应在还有工具轮数时改抓其他相关搜索结果。{tool_limit}
 6. 回答具体日期时，正文必须明确说明该日期对应用户所问事件；网页的“发布时间/更新时间”不能当成开学、放假等事件日期。若抓到的只是列表页、图片页或正文没有答案，应继续换查询搜索，不能猜测。
 7. 不要编造链接或事实；最终回答必须基于工具结果，并附上实际来源链接。达到搜索上限仍无可靠答案时，要如实说明未核实到。
 8. 使用与用户相同的语言回答；使用英文来源不等于改用英文回答。
@@ -345,8 +353,12 @@ async def _apply_tool_calls(
     tool_calls: List[dict],
     assistant_message: Optional[dict] = None,
     max_search_results: int = 10,
+    model: Optional[str] = None,
+    scrape_state: Optional[ScrapeRunState] = None,
 ) -> List[dict]:
     """把工具结果加入模型上下文，并返回适合前端展示的精简事件。"""
+    use_model = model or MODEL_NAME
+    active_scrape_state = scrape_state or ScrapeRunState()
     # 模型可能主动请求 10 条；普通思考模式必须在执行层强制压到 5 条。
     for tc in tool_calls:
         fn = tc.get("function") or {}
@@ -379,42 +391,29 @@ async def _apply_tool_calls(
         fn = tc.get("function") or {}
         name = fn.get("name") or ""
         args = fn.get("arguments") or "{}"
-        routing = None
+        tc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+        tc["id"] = tc_id
+        logger.info("exec tool %s args=%s", name, str(args)[:200])
         if name == "scrape_url":
-            replacement = _replacement_scrape_source(msgs, args)
-            if replacement:
-                original_args = _tool_arguments(tc)
-                requested_url = str(original_args.get("url") or "")
-                replacement_url = str(replacement.get("url") or "")
-                routing = {
-                    "requested_url": requested_url,
-                    "replacement_url": replacement_url,
-                    "replacement_title": str(
-                        replacement.get("title") or ""
-                    )[:300],
-                }
-                fn["arguments"] = json.dumps(
-                    {"url": replacement_url},
+            result = await _run_scrape_url_tool_once(
+                msgs,
+                args,
+                model=use_model,
+                state=active_scrape_state,
+            )
+        else:
+            try:
+                result = await asyncio.wait_for(
+                    execute_tool(name, args),
+                    timeout=_WEB_SEARCH_TIMEOUT if name == "web_search" else _TOOL_EXEC_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                timeout = _WEB_SEARCH_TIMEOUT if name == "web_search" else _TOOL_EXEC_TIMEOUT
+                logger.warning("tool %s timed out after %.1fs", name, timeout)
+                result = json.dumps(
+                    {"error": f"工具执行超过 {timeout:.0f} 秒，已停止"},
                     ensure_ascii=False,
                 )
-                args = fn["arguments"]
-        tc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
-        logger.info("exec tool %s args=%s", name, str(args)[:200])
-        try:
-            result = await asyncio.wait_for(
-                execute_tool(name, args),
-                timeout=_WEB_SEARCH_TIMEOUT if name == "web_search" else _TOOL_EXEC_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            timeout = _WEB_SEARCH_TIMEOUT if name == "web_search" else _TOOL_EXEC_TIMEOUT
-            logger.warning("tool %s timed out after %.1fs", name, timeout)
-            result = json.dumps(
-                {"error": f"工具执行超过 {timeout:.0f} 秒，已停止"},
-                ensure_ascii=False,
-            )
-        if name == "scrape_url":
-            result = _annotate_scrape_routing(result, routing)
-            result = _scrape_search_index_fallback(msgs, args, result)
         msgs.append(
             {
                 "role": "tool",
@@ -453,21 +452,44 @@ def _avoid_scrape_url(value: str) -> bool:
     return any(host == blocked_host and path == blocked_path for blocked_host, blocked_path in _SCRAPE_AVOID_PATHS)
 
 
-def _replacement_scrape_source(
-    messages: List[dict],
-    arguments: Any,
-) -> Optional[dict]:
-    """已知强反爬来源改抓同一搜索轮中的可访问候选。"""
+def _payload_dict(result: Any) -> dict:
     try:
-        args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
-    target_url = str(args.get("url") or "")
-    if not _avoid_scrape_url(target_url):
-        return None
-    normalized_target = _normalized_url(target_url)
-    used_urls = set()
-    for message in messages:
+        payload = json.loads(result) if isinstance(result, str) else result
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _is_readable_scrape_result(result: Any) -> bool:
+    """是否拿到可用网页正文（非 error / 非仅搜索摘要）。"""
+    payload = _payload_dict(result)
+    if not payload or payload.get("error"):
+        return False
+    # 合并会话结果显式标记
+    if payload.get("readable") is True:
+        return True
+    if payload.get("readable") is False:
+        return False
+    if payload.get("partial") is True:
+        return False
+    if str(payload.get("source") or "") == "search_index_fallback":
+        return False
+    body = payload.get("markdown")
+    if body is None:
+        body = payload.get("content")
+    text = str(body or "").strip()
+    if len(text) < 80:
+        return False
+    # 纯 fallback 包装（整篇都是“不是网页全文”类说明）才判不可读
+    if text.startswith("源站阻止了自动读取") or text.startswith("本次 scrape_url"):
+        return False
+    return True
+
+
+def _search_result_lists(messages: List[dict]) -> List[list]:
+    """最近搜索结果批次（新→旧），用于按相关性顺序换源。"""
+    batches = []
+    for message in reversed(messages):
         if message.get("role") != "tool":
             continue
         try:
@@ -476,127 +498,457 @@ def _replacement_scrape_source(
             continue
         if not isinstance(payload, dict):
             continue
-        for key in ("url", "requested_url", "replacement_url"):
-            normalized = _normalized_url(payload.get(key))
-            if normalized:
-                used_urls.add(normalized)
+        results = payload.get("results")
+        if not isinstance(results, list) or not results:
+            continue
+        if not any(isinstance(item, dict) and item.get("url") for item in results):
+            continue
+        batches.append(results)
+    return batches
 
-    for message in reversed(messages):
-        if message.get("role") != "tool":
-            continue
-        try:
-            payload = json.loads(message.get("content") or "{}")
-        except (json.JSONDecodeError, TypeError):
-            continue
-        results = payload.get("results") if isinstance(payload, dict) else None
-        if not isinstance(results, list):
-            continue
-        if not any(
-            _normalized_url(item.get("url")) == normalized_target
+
+def _search_batch_for_url(messages: List[dict], requested_url: str) -> List[dict]:
+    """只返回包含请求 URL 的最近一次搜索结果，绝不混入其他搜索轮。"""
+    requested = _normalized_url(requested_url)
+    if not requested:
+        return []
+    for results in _search_result_lists(messages):
+        if any(
+            isinstance(item, dict)
+            and _normalized_url(item.get("url")) == requested
             for item in results
-            if isinstance(item, dict)
+        ):
+            return results[:10]
+    return []
+
+
+async def _fetch_scrape_once(url: str) -> str:
+    """单次 HTTP 抓取。失败不贴搜索摘要，只返回错误/空壳状态，由上层换源。"""
+    try:
+        return await asyncio.wait_for(
+            execute_tool("scrape_url", {"url": url}),
+            timeout=_TOOL_EXEC_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return json.dumps(
+            {
+                "url": url,
+                "error": f"工具执行超过 {_TOOL_EXEC_TIMEOUT:.0f} 秒，已停止",
+            },
+            ensure_ascii=False,
+        )
+
+
+def _compose_scrape_session_result(
+    requested_url: str,
+    n_tried: int,
+    readable: Optional[dict],
+    requested_status: str,
+    resolution_reason: str = "",
+) -> str:
+    """
+    一次 scrape_url 只向主上下文注入一份新的成功正文；失败只给极短状态。
+    requested_url 与 resolved_url 必须明确分开，避免模型误认来源。
+    """
+    if readable:
+        title = str(readable.get("title") or "")[:300]
+        url = str(readable.get("url") or "")[:2000]
+        body = str(readable.get("markdown") or readable.get("content") or "")
+        out = {
+            "url": url,
+            "resolved_url": url,
+            "title": title,
+            "markdown": body,
+            "source": readable.get("source") or "httpx",
+            "extraction": readable.get("extraction") or "",
+            "requested_url": requested_url,
+            "requested_url_status": requested_status,
+            "source_replaced": _normalized_url(url) != _normalized_url(requested_url),
+            "resolution_reason": resolution_reason,
+            "scrape_attempts": n_tried,
+            "readable": True,
+            "single_tool_call": True,
+        }
+        if out["source_replaced"]:
+            out["message"] = (
+                "requested_url 未作为本次正文来源；已在同一轮搜索结果内换源。"
+                "以下正文只属于 resolved_url，引用时只能引用 resolved_url，"
+                "并且不要再次抓取它。"
+            )
+        else:
+            out["message"] = (
+                "已成功读取 requested_url；以下正文属于 resolved_url，"
+                "不要再次抓取它。"
+            )
+        return json.dumps(out, ensure_ascii=False)
+
+    # 全部不可读：不复制搜索 snippet，提示回看搜索 tool 结果
+    return json.dumps(
+        {
+            "url": requested_url,
+            "requested_url": requested_url,
+            "resolved_url": "",
+            "requested_url_status": requested_status,
+            "source_replaced": False,
+            "resolution_reason": resolution_reason,
+            "readable": False,
+            "partial": True,
+            "single_tool_call": True,
+            "scrape_attempts": n_tried,
+            "error": (
+                f"本轮搜索结果中没有新的可读正文（本次内部尝试 {n_tried} 个候选）。"
+                "没有重复注入此前的搜索摘要或已读正文；"
+                "请基于上下文中已有资料继续分析，不要假定读到了新网页。"
+            ),
+        },
+        ensure_ascii=False,
+    )
+
+
+def _latest_user_question(messages: List[dict]) -> str:
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()[:2000]
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(str(item.get("text") or ""))
+                elif isinstance(item, str):
+                    parts.append(item)
+            text = "\n".join(p for p in parts if p).strip()
+            if text:
+                return text[:2000]
+    return ""
+
+
+def _collect_scrape_candidates(
+    messages: List[dict],
+    requested_url: str,
+    state: ScrapeRunState,
+) -> List[dict]:
+    """从请求 URL 所属的唯一搜索批次收集尚未尝试的候选。"""
+    batch = _search_batch_for_url(messages, requested_url)
+    seen = set()
+    candidates: List[dict] = []
+    for item in batch:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "")
+        nurl = _normalized_url(url)
+        if (
+            not url.startswith(("http://", "https://"))
+            or not nurl
+            or nurl in seen
+            or nurl in state.attempted_urls
+            or nurl in state.injected_urls
+            or _avoid_scrape_url(url)
         ):
             continue
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            candidate = str(item.get("url") or "")
-            normalized = _normalized_url(candidate)
-            if (
-                not candidate.startswith(("http://", "https://"))
-                or not normalized
-                or normalized == normalized_target
-                or normalized in used_urls
-                or _avoid_scrape_url(candidate)
-            ):
-                continue
-            return item
-    return None
+        seen.add(nurl)
+        candidates.append(
+            {
+                "title": str(item.get("title") or "")[:300],
+                "url": url,
+                "snippet": str(
+                    item.get("snippet") or item.get("key_point") or ""
+                )[:500],
+            }
+        )
+
+    # 没有对应搜索批次时，只允许尝试模型明确请求的 URL，不能借用其他轮结果。
+    requested_n = _normalized_url(requested_url)
+    if (
+        not batch
+        and requested_url.startswith(("http://", "https://"))
+        and requested_n
+        and requested_n not in state.attempted_urls
+        and requested_n not in state.injected_urls
+        and not _avoid_scrape_url(requested_url)
+    ):
+        candidates.append(
+            {
+                "title": "(模型指定)",
+                "url": requested_url,
+                "snippet": "",
+            }
+        )
+    return candidates
 
 
-def _annotate_scrape_routing(
-    result: str,
-    routing: Optional[dict],
-) -> str:
-    if not routing:
-        return result
+def _fallback_rank_urls(candidates: List[dict], preferred_url: str) -> List[str]:
+    """排序失败时：先模型指定 URL，再保持搜索返回顺序。"""
+    prefer_n = _normalized_url(preferred_url)
+    urls: List[str] = []
+    if prefer_n:
+        for item in candidates:
+            if _normalized_url(item.get("url")) == prefer_n:
+                urls.append(str(item["url"]))
+                break
+    for item in candidates:
+        u = str(item.get("url") or "")
+        if not u or _normalized_url(u) in {_normalized_url(x) for x in urls}:
+            continue
+        urls.append(u)
+    return urls
+
+
+def _parse_ranked_urls(text: str, allowed: Dict[str, str]) -> List[str]:
+    """
+    从模型输出解析 URL 优先级列表。
+    allowed: normalized_url -> original_url
+    """
+    if not text or not allowed:
+        return []
+    raw = text.strip()
+    # 去掉 ```json 包裹
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, re.I)
+    if fence:
+        raw = fence.group(1).strip()
+    data = None
     try:
-        payload = json.loads(result)
-    except (json.JSONDecodeError, TypeError):
-        return result
-    if not isinstance(payload, dict):
-        return result
-    payload["requested_url"] = routing["requested_url"]
-    payload["replacement_url"] = routing["replacement_url"]
-    payload["routing_note"] = (
-        "原来源经常阻止 VPS 抓取，已自动改用同一轮搜索中的可访问候选："
-        + (routing.get("replacement_title") or routing["replacement_url"])
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\[[\s\S]*\]", raw)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                data = None
+    urls: List[str] = []
+    if isinstance(data, dict):
+        data = data.get("urls") or data.get("ranked") or data.get("order") or []
+    if not isinstance(data, list):
+        return []
+    for item in data:
+        if isinstance(item, str):
+            u = item.strip()
+        elif isinstance(item, dict):
+            u = str(item.get("url") or "").strip()
+        else:
+            continue
+        n = _normalized_url(u)
+        if n in allowed and allowed[n] not in urls:
+            urls.append(allowed[n])
+    return urls
+
+
+async def _rank_scrape_candidates_by_model(
+    messages: List[dict],
+    candidates: List[dict],
+    preferred_url: str,
+    model: str,
+) -> List[str]:
+    """
+    抓取前：用当前模型根据标题/摘要对全部搜索结果排序。
+    返回 original URL 列表；失败则空列表（调用方回退搜索顺序）。
+    """
+    if len(candidates) <= 1:
+        return [str(c["url"]) for c in candidates]
+
+    allowed = {_normalized_url(c["url"]): str(c["url"]) for c in candidates}
+    question = _latest_user_question(messages)
+    lines = []
+    for i, c in enumerate(candidates, 1):
+        lines.append(
+            f"{i}. title: {c.get('title') or '(无标题)'}\n"
+            f"   url: {c.get('url')}\n"
+            f"   snippet: {c.get('snippet') or '(无摘要)'}"
+        )
+    prefer_note = (
+        f"助手拟优先打开的 URL：{preferred_url}\n"
+        if preferred_url
+        else ""
     )
-    return json.dumps(payload, ensure_ascii=False)
+    prompt = (
+        "你是网页阅读优先级排序器。根据用户问题与各结果的标题/摘要，"
+        "判断「最可能包含完整有用正文」的阅读顺序。\n"
+        "只输出一个 JSON 数组，元素为 url 字符串，从最优先到最不优先。"
+        "必须且只能使用下面给出的 url，不要编造，不要输出解释。\n\n"
+        f"用户问题：\n{question or '(未知)'}\n\n"
+        f"{prefer_note}"
+        f"候选（共 {len(candidates)} 条）：\n" + "\n".join(lines)
+    )
+    try:
+        data = await _call_llm_with_model(
+            [
+                {
+                    "role": "system",
+                    "content": "只输出 JSON 字符串数组，不要 Markdown，不要其它文字。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            model=model,
+            with_tools=False,
+        )
+        content = (
+            ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+            or ""
+        )
+        if isinstance(content, list):
+            content = "".join(
+                str(part.get("text") or "")
+                if isinstance(part, dict)
+                else str(part)
+                for part in content
+            )
+        ranked = _parse_ranked_urls(str(content), allowed)
+        # 补全模型漏掉的 url，保持相对稳定：按原候选顺序追加
+        if ranked:
+            have = {_normalized_url(u) for u in ranked}
+            for c in candidates:
+                n = _normalized_url(c["url"])
+                if n not in have:
+                    ranked.append(str(c["url"]))
+            logger.info(
+                "scrape rank by model: %s urls, preferred=%s",
+                len(ranked),
+                (preferred_url or "")[:120],
+            )
+            return ranked
+    except Exception as exc:
+        logger.warning("scrape candidate ranking failed: %s", type(exc).__name__)
+    return []
 
 
-def _scrape_search_index_fallback(
+async def _run_scrape_url_tool_once(
     messages: List[dict],
     arguments: Any,
-    result: str,
+    model: Optional[str] = None,
+    state: Optional[ScrapeRunState] = None,
 ) -> str:
-    """源站反爬时复用先前搜索摘要，避免把 403 当成唯一工具结果。"""
+    """
+    一次 scrape_url：只在请求 URL 所属搜索批次内排序与换源。
+    失败候选不进入上下文；每个成功 URL 的正文最多注入一次。
+    """
+    use_model = model or MODEL_NAME
+    active_state = state or ScrapeRunState()
     try:
-        payload = json.loads(result)
-    except (json.JSONDecodeError, TypeError):
-        return result
-    if not isinstance(payload, dict) or not payload.get("error"):
-        return result
-    try:
-        args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
+        args = (
+            json.loads(arguments)
+            if isinstance(arguments, str)
+            else dict(arguments or {})
+        )
     except (json.JSONDecodeError, TypeError, ValueError):
-        return result
-    target_url = str(args.get("url") or payload.get("url") or "")
-    normalized_target = _normalized_url(target_url)
-    if not normalized_target:
-        return result
+        args = {}
+    requested_url = str(args.get("url") or "").strip()
+    req_n = _normalized_url(requested_url)
+    if req_n in active_state.injected_urls:
+        requested_status = "already_in_context"
+        reason = "requested_url_already_in_context"
+    elif req_n in active_state.attempted_urls:
+        requested_status = "unreadable"
+        reason = "requested_url_previously_unreadable"
+    elif requested_url and _avoid_scrape_url(requested_url):
+        requested_status = "blocked"
+        reason = "requested_url_blocked"
+    else:
+        requested_status = "pending"
+        reason = ""
 
-    for message in reversed(messages):
-        if message.get("role") != "tool":
+    candidates = _collect_scrape_candidates(
+        messages,
+        requested_url=requested_url,
+        state=active_state,
+    )
+
+    if not candidates:
+        if requested_status == "pending":
+            requested_status = "no_matching_search_batch"
+            reason = "no_untried_candidate_in_requested_batch"
+        return _compose_scrape_session_result(
+            requested_url,
+            0,
+            None,
+            requested_status=requested_status,
+            resolution_reason=reason,
+        )
+
+    preferred_for_rank = (
+        requested_url
+        if req_n not in active_state.attempted_urls
+        and req_n not in active_state.injected_urls
+        else ""
+    )
+    ranked_urls = await _rank_scrape_candidates_by_model(
+        messages,
+        candidates,
+        preferred_url=preferred_for_rank,
+        model=use_model,
+    )
+    if not ranked_urls:
+        ranked_urls = _fallback_rank_urls(candidates, preferred_for_rank)
+
+    n_tried = 0
+    for current_url in ranked_urls:
+        nurl = _normalized_url(current_url)
+        if (
+            not nurl
+            or nurl in active_state.attempted_urls
+            or nurl in active_state.injected_urls
+            or _avoid_scrape_url(current_url)
+        ):
             continue
-        try:
-            search_payload = json.loads(message.get("content") or "{}")
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not isinstance(search_payload, dict):
-            continue
-        for item in search_payload.get("results") or []:
-            if not isinstance(item, dict):
-                continue
-            if _normalized_url(item.get("url")) != normalized_target:
-                continue
-            title = str(item.get("title") or "")[:300]
-            snippet = str(
-                item.get("snippet") or item.get("key_point") or ""
-            )[:1000]
-            if not title and not snippet:
-                continue
-            warning = str(payload.get("error") or "")[:500]
-            markdown = (
-                "源站阻止了自动读取。以下内容来自此前搜索结果的索引摘要，"
-                "不是网页全文，不能据此推断摘要中未提及的细节。\n\n"
+        active_state.attempted_urls.add(nurl)
+        n_tried += 1
+        logger.info(
+            "scrape_url ranked try %s/%s %s",
+            n_tried,
+            len(ranked_urls),
+            current_url[:160],
+        )
+        raw = await _fetch_scrape_once(current_url)
+        if _is_readable_scrape_result(raw):
+            payload = _payload_dict(raw)
+            if not payload.get("url"):
+                payload["url"] = current_url
+            resolved_url = str(payload.get("url") or current_url)
+            resolved_n = _normalized_url(resolved_url) or nurl
+            active_state.injected_urls.add(resolved_n)
+            active_state.attempted_urls.add(resolved_n)
+            if nurl == req_n:
+                requested_status = "readable"
+                reason = (
+                    "requested_url_readable"
+                    if resolved_n == req_n
+                    else "requested_url_readable_via_redirect"
+                )
+            elif requested_status == "already_in_context":
+                reason = "requested_url_already_in_context_selected_new_source"
+            elif requested_status == "unreadable":
+                reason = "requested_url_unreadable_selected_new_source"
+            elif requested_status == "blocked":
+                reason = "requested_url_blocked_selected_accessible_source"
+            elif req_n in active_state.attempted_urls:
+                requested_status = "unreadable"
+                reason = "requested_url_failed_selected_accessible_source"
+            else:
+                requested_status = "not_selected"
+                reason = "higher_ranked_source_selected"
+            return _compose_scrape_session_result(
+                requested_url,
+                n_tried,
+                payload,
+                requested_status=requested_status,
+                resolution_reason=reason,
             )
-            if title:
-                markdown += f"标题：{title}\n\n"
-            if snippet:
-                markdown += f"索引摘要：{snippet}"
-            return json.dumps(
-                {
-                    "url": target_url,
-                    "title": title,
-                    "markdown": markdown,
-                    "source": "search_index_fallback",
-                    "partial": True,
-                    "warning": warning,
-                },
-                ensure_ascii=False,
-            )
-    return result
+
+    if req_n in active_state.injected_urls:
+        requested_status = "already_in_context"
+        reason = "requested_url_already_in_context_no_new_readable_source"
+    elif req_n in active_state.attempted_urls:
+        requested_status = "unreadable"
+        reason = "requested_url_unreadable_no_new_readable_source"
+    return _compose_scrape_session_result(
+        requested_url,
+        n_tried,
+        None,
+        requested_status=requested_status,
+        resolution_reason=reason or "batch_exhausted",
+    )
 
 
 def _tool_arguments(tool_call: dict) -> dict:
@@ -680,14 +1032,35 @@ def _tool_trace_event(
         )
     elif name == "scrape_url":
         event["url"] = str(payload.get("url") or event.get("url") or "")[:2000]
+        event["requested_url"] = str(payload.get("requested_url") or "")[:2000]
+        event["resolved_url"] = str(payload.get("resolved_url") or "")[:2000]
+        event["requested_url_status"] = str(
+            payload.get("requested_url_status") or ""
+        )[:100]
+        event["source_replaced"] = bool(payload.get("source_replaced"))
+        event["resolution_reason"] = str(
+            payload.get("resolution_reason") or ""
+        )[:120]
         event["source"] = str(payload.get("source") or "")[:100]
         event["extraction"] = str(payload.get("extraction") or "")[:100]
         page_title = str(payload.get("title") or "")[:300]
-        event["title"] = f"读取网页：{page_title}" if page_title else "读取网页"
+        attempts_n = payload.get("scrape_attempts")
+        if page_title:
+            event["title"] = f"读取网页：{page_title}"
+        else:
+            event["title"] = "读取网页"
+        if payload.get("source_replaced"):
+            event["title"] = f"{event['title']}（请求源未采用，已换源）"
+        if attempts_n and int(attempts_n) > 1:
+            event["title"] = f"{event['title']}（内部尝试 {attempts_n} 个候选）"
+        if payload.get("message"):
+            event["routing_note"] = str(payload.get("message"))[:500]
         body = payload.get("markdown")
         if body is None:
             body = payload.get("content")
         event["excerpt"] = str(body or "")[:2000]
+        if payload.get("readable") is False:
+            event["partial"] = True
     return event
 
 
@@ -719,12 +1092,23 @@ def _tool_running_events(tool_calls: List[dict]) -> List[dict]:
 
 
 def _tool_signature(tool_call: dict) -> Tuple[str, str]:
-    """用于阻止模型连续发出完全相同的工具调用。"""
+    """用于阻止模型重复发出等价工具调用（scrape 按规范化 URL 去重）。"""
     fn = tool_call.get("function") or {}
     name = str(fn.get("name") or "")
     raw_args = fn.get("arguments") or "{}"
     try:
         parsed = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        if not isinstance(parsed, dict):
+            parsed = {}
+    except Exception:
+        parsed = {}
+    if name == "scrape_url":
+        # 同一网页无论参数写法如何，都视为同一次抓取意图
+        return name, _normalized_url(parsed.get("url"))
+    if name == "web_search":
+        q = str(parsed.get("query") or "").strip().lower()
+        return name, q
+    try:
         args = json.dumps(parsed, ensure_ascii=False, sort_keys=True)
     except Exception:
         args = str(raw_args).strip()
@@ -925,6 +1309,7 @@ async def run_agent_stream(
     budget = _budget_for(reasoning_depth)
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     msgs = _normalize_messages(messages, _system_prompt(budget))
+    scrape_state = ScrapeRunState()
 
     if not get_model_config(use_model):
         yield _sse(_chunk(content="错误: 所选模型未配置或不可用", finish_reason="stop", model=use_model, cid=cid))
@@ -1094,6 +1479,8 @@ async def run_agent_stream(
                 tool_calls,
                 message,
                 budget.max_search_results,
+                model=use_model,
+                scrape_state=scrape_state,
             )
             tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
                 tool_events,
@@ -1127,6 +1514,8 @@ async def run_agent_stream(
                     tool_calls,
                     message,
                     budget.max_search_results,
+                    model=use_model,
+                    scrape_state=scrape_state,
                 )
                 tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
                     tool_events,
@@ -1314,6 +1703,7 @@ async def run_agent_sync(
     budget = _budget_for(reasoning_depth)
     msgs = _normalize_messages(messages, _system_prompt(budget))
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    scrape_state = ScrapeRunState()
 
     if not get_model_config(use_model):
         return _completion_obj(cid, use_model, "错误: 所选模型未配置或不可用")
@@ -1363,6 +1753,8 @@ async def run_agent_sync(
                 tool_calls,
                 message,
                 budget.max_search_results,
+                model=use_model,
+                scrape_state=scrape_state,
             )
             tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
                 tool_events,
@@ -1386,6 +1778,8 @@ async def run_agent_sync(
                     tool_calls,
                     message,
                     budget.max_search_results,
+                    model=use_model,
+                    scrape_state=scrape_state,
                 )
                 tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
                     tool_events,
