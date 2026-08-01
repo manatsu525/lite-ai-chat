@@ -77,6 +77,7 @@ def init_db() -> None:
                     content TEXT NOT NULL DEFAULT '',
                     status_message TEXT NOT NULL DEFAULT '',
                     trace_json TEXT NOT NULL DEFAULT '[]',
+                    usage_json TEXT NOT NULL DEFAULT '{}',
                     error TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                         DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -92,6 +93,10 @@ def init_db() -> None:
             if "trace_json" not in job_columns:
                 c.execute(
                     "ALTER TABLE chat_jobs ADD COLUMN trace_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "usage_json" not in job_columns:
+                c.execute(
+                    "ALTER TABLE chat_jobs ADD COLUMN usage_json TEXT NOT NULL DEFAULT '{}'"
                 )
             c.execute(
                 """
@@ -724,10 +729,16 @@ def update_chat_job(
     status_message: str = "",
     error: str = "",
     trace: Optional[list] = None,
+    usage: Optional[dict] = None,
 ) -> None:
     trace_json = (
         json.dumps(trace, ensure_ascii=False)
         if trace is not None
+        else None
+    )
+    usage_json = (
+        json.dumps(usage, ensure_ascii=False)
+        if usage is not None
         else None
     )
     with _lock:
@@ -737,10 +748,19 @@ def update_chat_job(
                 UPDATE chat_jobs
                 SET status = ?, content = ?, status_message = ?, error = ?,
                     trace_json = COALESCE(?, trace_json),
+                    usage_json = COALESCE(?, usage_json),
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE id = ?
                 """,
-                (status, content, status_message, error, trace_json, job_id),
+                (
+                    status,
+                    content,
+                    status_message,
+                    error,
+                    trace_json,
+                    usage_json,
+                    job_id,
+                ),
             )
             c.commit()
 
@@ -753,6 +773,12 @@ def _chat_job_dict(row: sqlite3.Row) -> dict:
     except (json.JSONDecodeError, TypeError):
         trace = []
     item["trace"] = trace if isinstance(trace, list) else []
+    raw_usage = item.pop("usage_json", "{}")
+    try:
+        usage = json.loads(raw_usage)
+    except (json.JSONDecodeError, TypeError):
+        usage = {}
+    item["usage"] = usage if isinstance(usage, dict) else {}
     return item
 
 
@@ -761,7 +787,8 @@ def get_chat_job(user_id: int, job_id: str) -> Optional[dict]:
         row = c.execute(
             """
             SELECT id, conversation_id, model, status, content,
-                   status_message, trace_json, error, created_at, updated_at
+                   status_message, trace_json, usage_json, error,
+                   created_at, updated_at
             FROM chat_jobs
             WHERE user_id = ? AND id = ?
             """,
@@ -775,7 +802,8 @@ def get_active_chat_job(user_id: int) -> Optional[dict]:
         row = c.execute(
             """
             SELECT id, conversation_id, model, status, content,
-                   status_message, trace_json, error, created_at, updated_at
+                   status_message, trace_json, usage_json, error,
+                   created_at, updated_at
             FROM chat_jobs
             WHERE user_id = ? AND status IN ('queued', 'running', 'stopping')
             ORDER BY created_at DESC

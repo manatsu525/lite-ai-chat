@@ -59,6 +59,63 @@ class ScrapeRunState:
     injected_urls: set = field(default_factory=set)
 
 
+@dataclass
+class TokenUsage:
+    """当前回答内所有模型请求的累计 usage；缺失上报时明确标记。"""
+
+    api_calls: int = 0
+    reported_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    pruned_reasoning_chars: int = 0
+    pruned_reasoning_blocks: int = 0
+
+    def note_call(self) -> None:
+        self.api_calls += 1
+
+    def add(self, raw: Any) -> None:
+        if not isinstance(raw, dict):
+            return
+        prompt = int(raw.get("prompt_tokens") or raw.get("input_tokens") or 0)
+        completion = int(
+            raw.get("completion_tokens") or raw.get("output_tokens") or 0
+        )
+        total = int(raw.get("total_tokens") or (prompt + completion))
+        prompt_details = raw.get("prompt_tokens_details") or {}
+        completion_details = raw.get("completion_tokens_details") or {}
+        self.reported_calls += 1
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.total_tokens += total
+        self.cached_tokens += int(
+            raw.get("cache_read_input_tokens")
+            or prompt_details.get("cached_tokens")
+            or 0
+        )
+        self.reasoning_tokens += int(
+            completion_details.get("reasoning_tokens")
+            or raw.get("reasoning_tokens")
+            or 0
+        )
+
+    def as_dict(self) -> dict:
+        return {
+            "api_calls": self.api_calls,
+            "reported_calls": self.reported_calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "cached_tokens": self.cached_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "pruned_reasoning_chars": self.pruned_reasoning_chars,
+            "pruned_reasoning_blocks": self.pruned_reasoning_blocks,
+            "complete": self.reported_calls == self.api_calls,
+        }
+
+
 _DEEP_BUDGET = AgentBudget(
     max_tool_rounds=MAX_TOOL_ROUNDS,
     max_tool_calls=None,
@@ -288,6 +345,36 @@ def _has_image_content(messages: List[dict]) -> bool:
     return False
 
 
+def _prune_stale_reasoning_content(
+    messages: List[dict], usage: Optional[TokenUsage] = None
+) -> Tuple[int, int]:
+    """只保留最新 reasoning_content，避免旧思考在后续轮次反复计费。"""
+    indexes = [
+        index
+        for index, message in enumerate(messages)
+        if message.get("role") == "assistant"
+        and message.get("reasoning_content") is not None
+    ]
+    removed_blocks = 0
+    removed_chars = 0
+    for index in indexes[:-1]:
+        value = messages[index].pop("reasoning_content", None)
+        if value is None:
+            continue
+        removed_blocks += 1
+        removed_chars += len(str(value))
+    if usage is not None:
+        usage.pruned_reasoning_blocks += removed_blocks
+        usage.pruned_reasoning_chars += removed_chars
+    if removed_blocks:
+        logger.info(
+            "pruned stale reasoning: blocks=%s chars=%s",
+            removed_blocks,
+            removed_chars,
+        )
+    return removed_blocks, removed_chars
+
+
 class ToolUseFailed(Exception):
     """Groq 返回 tool_use_failed，已解析出 synthetic tool_calls。"""
 
@@ -297,10 +384,17 @@ class ToolUseFailed(Exception):
         self.raw = raw
 
 
-async def _call_llm_with_model(messages: List[dict], model: str, with_tools: bool = True) -> dict:
+async def _call_llm_with_model(
+    messages: List[dict],
+    model: str,
+    with_tools: bool = True,
+    usage: Optional[TokenUsage] = None,
+) -> dict:
     model_config = get_model_config(model)
     if not model_config:
         raise RuntimeError(f"模型未配置或不可用: {model}")
+
+    _prune_stale_reasoning_content(messages, usage)
 
     body: Dict[str, Any] = {
         "model": model_config["model_id"],
@@ -319,6 +413,8 @@ async def _call_llm_with_model(messages: List[dict], model: str, with_tools: boo
             body["tool_choice"] = "auto"
 
     url = f"{model_config['api_base']}/chat/completions"
+    if usage is not None:
+        usage.note_call()
     async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
         r = await client.post(url, headers=_headers(model_config["api_key"]), json=body)
         if r.status_code >= 400:
@@ -345,7 +441,10 @@ async def _call_llm_with_model(messages: List[dict], model: str, with_tools: boo
                     f"（上游 HTTP {r.status_code}）"
                 )
             raise RuntimeError(f"LLM HTTP {r.status_code}: {r.text[:800]}")
-        return r.json()
+        data = r.json()
+        if usage is not None:
+            usage.add(data.get("usage"))
+        return data
 
 
 async def _apply_tool_calls(
@@ -1262,8 +1361,14 @@ def _chunk(
     }
 
 
+def _usage_sse(usage: TokenUsage, model: str, cid: str) -> str:
+    payload = _chunk(model=model, cid=cid)
+    payload["usage"] = usage.as_dict()
+    return _sse(payload)
+
+
 async def _resolve_round(
-    msgs: List[dict], model: str
+    msgs: List[dict], model: str, usage: Optional[TokenUsage] = None
 ) -> Tuple[Optional[dict], List[dict], Optional[str]]:
     """
     请求一轮模型。
@@ -1271,7 +1376,9 @@ async def _resolve_round(
     tool_calls 可能来自正常响应或 failed_generation 解析。
     """
     try:
-        data = await _call_llm_with_model(msgs, model=model, with_tools=True)
+        data = await _call_llm_with_model(
+            msgs, model=model, with_tools=True, usage=usage
+        )
     except ToolUseFailed as e:
         return None, e.tool_calls, None
     except Exception as e:
@@ -1306,6 +1413,7 @@ async def run_agent_stream(
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     msgs = _normalize_messages(messages, _system_prompt(budget))
     scrape_state = ScrapeRunState()
+    usage = TokenUsage()
 
     if not get_model_config(use_model):
         yield _sse(_chunk(content="错误: 所选模型未配置或不可用", finish_reason="stop", model=use_model, cid=cid))
@@ -1349,7 +1457,7 @@ async def run_agent_stream(
             }
             yield _sse(thinking)
         # 上游偶尔会长时间不返回；等待期间持续发 SSE 心跳，并设置整轮硬上限。
-        resolve_task = asyncio.create_task(_resolve_round(msgs, use_model))
+        resolve_task = asyncio.create_task(_resolve_round(msgs, use_model, usage))
         started = time.monotonic()
         round_timeout = _llm_round_timeout(use_model)
         try:
@@ -1379,6 +1487,7 @@ async def run_agent_stream(
             resolve_task.cancel()
             await asyncio.gather(resolve_task, return_exceptions=True)
             raise
+        yield _usage_sse(usage, use_model, cid)
         if err:
             yield _sse(_chunk(content=f"\n[上游模型错误] {err}", finish_reason="stop", model=use_model, cid=cid))
             yield "data: [DONE]\n\n"
@@ -1420,7 +1529,9 @@ async def run_agent_stream(
                 }
                 yield _sse(status)
                 try:
-                    async for piece in _call_llm_final_stream(msgs, use_model, cid):
+                    async for piece in _call_llm_final_stream(
+                        msgs, use_model, cid, usage
+                    ):
                         yield piece
                 except Exception as e:
                     yield _sse(
@@ -1548,7 +1659,9 @@ async def run_agent_stream(
             }
             yield _sse(final_status)
             try:
-                async for piece in _call_llm_final_stream(msgs, use_model, cid):
+                async for piece in _call_llm_final_stream(
+                    msgs, use_model, cid, usage
+                ):
                     yield piece
             except Exception as e:
                 yield _sse(
@@ -1615,7 +1728,9 @@ async def run_agent_stream(
 
         # 空内容：无 tools 再拉一次
         try:
-            async for piece in _call_llm_final_stream(msgs, use_model, cid):
+            async for piece in _call_llm_final_stream(
+                msgs, use_model, cid, usage
+            ):
                 yield piece
         except Exception as e:
             yield _sse(_chunk(content=f"\n[流式错误] {e}", finish_reason="stop", model=use_model, cid=cid))
@@ -1623,23 +1738,33 @@ async def run_agent_stream(
         return
 
 
-async def _call_llm_final_stream(messages: List[dict], model: str, cid: str) -> AsyncIterator[str]:
+async def _call_llm_final_stream(
+    messages: List[dict],
+    model: str,
+    cid: str,
+    usage: Optional[TokenUsage] = None,
+) -> AsyncIterator[str]:
     """最终轮：不带 tools，流式输出。"""
     model_config = get_model_config(model)
     if not model_config:
         raise RuntimeError(f"模型未配置或不可用: {model}")
+
+    active_usage = usage or TokenUsage()
+    _prune_stale_reasoning_content(messages, active_usage)
 
     # 清理历史里可能让上游困惑的 tool 结构：保留，但去掉 tools 参数
     body = {
         "model": model_config["model_id"],
         "messages": messages,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
     if model_config["provider"] == "deepseek":
         body["thinking"] = {"type": "enabled"}
     else:
         body["temperature"] = 0.5
     url = f"{model_config['api_base']}/chat/completions"
+    active_usage.note_call()
     async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
         async with client.stream(
             "POST",
@@ -1651,23 +1776,34 @@ async def _call_llm_final_stream(messages: List[dict], model: str, cid: str) -> 
                 text = (await resp.aread()).decode("utf-8", errors="replace")
                 # 流式失败时退回非流式
                 logger.warning("final stream failed: %s", text[:300])
-                data = await _call_llm_with_model(messages, model=model, with_tools=False)
+                data = await _call_llm_with_model(
+                    messages,
+                    model=model,
+                    with_tools=False,
+                    usage=active_usage,
+                )
                 content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
                 if content:
                     yield _sse(_chunk(content=content, model=model, cid=cid))
                 yield _sse(_chunk(finish_reason="stop", model=model, cid=cid))
+                yield _usage_sse(active_usage, model, cid)
                 yield "data: [DONE]\n\n"
                 return
+            stream_usage = None
             async for line in resp.aiter_lines():
                 if not line:
                     continue
                 if line.startswith("data: "):
                     payload = line[6:].strip()
                     if payload == "[DONE]":
+                        active_usage.add(stream_usage)
+                        yield _usage_sse(active_usage, model, cid)
                         yield "data: [DONE]\n\n"
                         return
                     try:
                         obj = json.loads(payload)
+                        if isinstance(obj.get("usage"), dict):
+                            stream_usage = obj["usage"]
                         obj["id"] = cid
                         obj["model"] = model
                         # DeepSeek 会把内部 reasoning_content 逐 token 流出；
@@ -1685,6 +1821,8 @@ async def _call_llm_final_stream(messages: List[dict], model: str, cid: str) -> 
                         yield _sse(obj)
                     except json.JSONDecodeError:
                         continue
+            active_usage.add(stream_usage)
+            yield _usage_sse(active_usage, model, cid)
             yield "data: [DONE]\n\n"
 
 

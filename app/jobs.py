@@ -13,6 +13,29 @@ _start_lock = asyncio.Lock()
 _attachment_job_lock = asyncio.Lock()
 
 
+def clean_usage(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    cleaned = {}
+    for key in (
+        "api_calls",
+        "reported_calls",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+        "pruned_reasoning_chars",
+        "pruned_reasoning_blocks",
+    ):
+        try:
+            cleaned[key] = max(0, int(value.get(key) or 0))
+        except (TypeError, ValueError):
+            cleaned[key] = 0
+    cleaned["complete"] = bool(value.get("complete"))
+    return cleaned
+
+
 def clean_trace(value: Any) -> List[dict]:
     """限制过程记录体积，避免轮询和 SQLite 被网页正文拖大。"""
     if not isinstance(value, list):
@@ -131,10 +154,13 @@ async def _run_job(
 ) -> None:
     content = ""
     trace: List[dict] = []
+    usage: dict = {}
     status_message = "思考中…"
     last_persist = 0.0
     attachment_lock_acquired = False
-    users.update_chat_job(job_id, "running", content, status_message, trace=trace)
+    users.update_chat_job(
+        job_id, "running", content, status_message, trace=trace, usage=usage
+    )
     try:
         model_messages = [
             {
@@ -181,6 +207,9 @@ async def _run_job(
                         trace_events,
                     )
                     force_persist = force_persist or bool(trace_events)
+                if isinstance(payload.get("usage"), dict):
+                    usage = clean_usage(payload["usage"])
+                    force_persist = True
                 for choice in payload.get("choices") or []:
                     content += (choice.get("delta") or {}).get("content") or ""
 
@@ -192,6 +221,7 @@ async def _run_job(
                     content,
                     status_message,
                     trace=trace,
+                    usage=usage,
                 )
                 last_persist = now
 
@@ -205,7 +235,9 @@ async def _run_job(
             content,
             trace,
         )
-        users.update_chat_job(job_id, "completed", content, "", trace=trace)
+        users.update_chat_job(
+            job_id, "completed", content, "", trace=trace, usage=usage
+        )
     except asyncio.CancelledError:
         stopped_content = content
         if stopped_content:
@@ -220,7 +252,9 @@ async def _run_job(
             stopped_content,
             trace,
         )
-        users.update_chat_job(job_id, "stopped", stopped_content, "", trace=trace)
+        users.update_chat_job(
+            job_id, "stopped", stopped_content, "", trace=trace, usage=usage
+        )
     except Exception as exc:
         error = f"{type(exc).__name__}: {str(exc)[:500]}"
         failed_content = content or f"[后台生成失败] {error}"
@@ -239,6 +273,7 @@ async def _run_job(
             "",
             error,
             trace,
+            usage,
         )
     finally:
         if attachment_lock_acquired:
@@ -290,6 +325,7 @@ async def start_job(
             "content": "",
             "status_message": "已提交，等待运行…",
             "trace": [],
+            "usage": {},
             "error": "",
         }
 
