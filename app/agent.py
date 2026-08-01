@@ -123,8 +123,8 @@ _DEEP_BUDGET = AgentBudget(
     max_scrapes=_MAX_EXTERNAL_SCRAPES,
 )
 _NORMAL_BUDGET = AgentBudget(
-    max_tool_rounds=min(MAX_TOOL_ROUNDS, 5),
-    max_tool_calls=10,
+    max_tool_rounds=min(MAX_TOOL_ROUNDS, 4),
+    max_tool_calls=8,
     # 普通模式不再分别限制搜索和抓取；两者都只受总工具调用上限约束。
     max_searches=10,
     max_search_results=10,
