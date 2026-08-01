@@ -2183,8 +2183,6 @@
         ["上报调用", formatTokenCount(usage.reported_calls) + "/" + formatTokenCount(calls)],
         ["缓存 token", formatTokenCount(usage.cached_tokens)],
         ["Reasoning token", formatTokenCount(usage.reasoning_tokens)],
-        ["清理旧思考", formatTokenCount(usage.pruned_reasoning_blocks) +
-          " 段 / " + formatTokenCount(usage.pruned_reasoning_chars) + " 字符"],
       ];
       for (const row of rows) {
         const item = document.createElement("span");

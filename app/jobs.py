@@ -24,8 +24,6 @@ def clean_usage(value: Any) -> dict:
         "total_tokens",
         "cached_tokens",
         "reasoning_tokens",
-        "pruned_reasoning_chars",
-        "pruned_reasoning_blocks",
         "complete",
     }
     if not known_keys.intersection(value):
@@ -39,8 +37,6 @@ def clean_usage(value: Any) -> dict:
         "total_tokens",
         "cached_tokens",
         "reasoning_tokens",
-        "pruned_reasoning_chars",
-        "pruned_reasoning_blocks",
     ):
         try:
             cleaned[key] = max(0, int(value.get(key) or 0))

@@ -73,8 +73,6 @@ class TokenUsage:
     total_tokens: int = 0
     cached_tokens: int = 0
     reasoning_tokens: int = 0
-    pruned_reasoning_chars: int = 0
-    pruned_reasoning_blocks: int = 0
 
     def note_call(self) -> None:
         self.api_calls += 1
@@ -113,8 +111,6 @@ class TokenUsage:
             "total_tokens": self.total_tokens,
             "cached_tokens": self.cached_tokens,
             "reasoning_tokens": self.reasoning_tokens,
-            "pruned_reasoning_chars": self.pruned_reasoning_chars,
-            "pruned_reasoning_blocks": self.pruned_reasoning_blocks,
             "complete": self.reported_calls == self.api_calls,
         }
 
@@ -365,43 +361,6 @@ def _has_image_content(messages: List[dict]) -> bool:
     return False
 
 
-def _prune_stale_reasoning_content(
-    messages: List[dict], usage: Optional[TokenUsage] = None
-) -> Tuple[int, int]:
-    """只保留最新 reasoning_content，避免旧思考在后续轮次反复计费。"""
-    indexes = [
-        index
-        for index, message in enumerate(messages)
-        if message.get("role") == "assistant"
-        and message.get("reasoning_content") is not None
-    ]
-    removed_blocks = 0
-    removed_chars = 0
-    for index in indexes[:-1]:
-        value = messages[index].pop("reasoning_content", None)
-        if value is None:
-            continue
-        removed_blocks += 1
-        removed_chars += len(str(value))
-    if usage is not None:
-        usage.pruned_reasoning_blocks += removed_blocks
-        usage.pruned_reasoning_chars += removed_chars
-    if removed_blocks:
-        logger.info(
-            "pruned stale reasoning: blocks=%s chars=%s",
-            removed_blocks,
-            removed_chars,
-        )
-    return removed_blocks, removed_chars
-
-
-def _requires_full_reasoning_history(model_config: dict) -> bool:
-    """DeepSeek 思考模式要求回传每一轮 reasoning_content，不能裁剪。"""
-    provider = str(model_config.get("provider") or "").lower()
-    model_id = str(model_config.get("model_id") or "").lower()
-    return provider == "deepseek" or "deepseek" in model_id
-
-
 class ToolUseFailed(Exception):
     """Groq 返回 tool_use_failed，已解析出 synthetic tool_calls。"""
 
@@ -420,9 +379,6 @@ async def _call_llm_with_model(
     model_config = get_model_config(model)
     if not model_config:
         raise RuntimeError(f"模型未配置或不可用: {model}")
-
-    if not _requires_full_reasoning_history(model_config):
-        _prune_stale_reasoning_content(messages, usage)
 
     body: Dict[str, Any] = {
         "model": model_config["model_id"],
@@ -1799,9 +1755,6 @@ async def _call_llm_final_stream(
         raise RuntimeError(f"模型未配置或不可用: {model}")
 
     active_usage = usage or TokenUsage()
-    if not _requires_full_reasoning_history(model_config):
-        _prune_stale_reasoning_content(messages, active_usage)
-
     # 清理历史里可能让上游困惑的 tool 结构：保留，但去掉 tools 参数
     body = {
         "model": model_config["model_id"],
