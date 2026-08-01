@@ -353,11 +353,9 @@ async def _apply_tool_calls(
     tool_calls: List[dict],
     assistant_message: Optional[dict] = None,
     max_search_results: int = 10,
-    model: Optional[str] = None,
     scrape_state: Optional[ScrapeRunState] = None,
 ) -> List[dict]:
     """把工具结果加入模型上下文，并返回适合前端展示的精简事件。"""
-    use_model = model or MODEL_NAME
     active_scrape_state = scrape_state or ScrapeRunState()
     # 模型可能主动请求 10 条；普通思考模式必须在执行层强制压到 5 条。
     for tc in tool_calls:
@@ -398,7 +396,6 @@ async def _apply_tool_calls(
             result = await _run_scrape_url_tool_once(
                 msgs,
                 args,
-                model=use_model,
                 state=active_scrape_state,
             )
         else:
@@ -520,6 +517,32 @@ def _search_batch_for_url(messages: List[dict], requested_url: str) -> List[dict
         ):
             return results[:10]
     return []
+
+
+def _search_query_for_url(messages: List[dict], requested_url: str) -> str:
+    """取得请求 URL 所属搜索批次的查询词，供本地相关性排序使用。"""
+    requested = _normalized_url(requested_url)
+    if not requested:
+        return ""
+    for message in reversed(messages):
+        if message.get("role") != "tool":
+            continue
+        try:
+            payload = json.loads(message.get("content") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        results = payload.get("results")
+        if not isinstance(results, list):
+            continue
+        if any(
+            isinstance(item, dict)
+            and _normalized_url(item.get("url")) == requested
+            for item in results
+        ):
+            return str(payload.get("query") or "")[:500]
+    return ""
 
 
 async def _fetch_scrape_once(url: str) -> str:
@@ -679,152 +702,134 @@ def _collect_scrape_candidates(
     return candidates
 
 
-def _fallback_rank_urls(candidates: List[dict], preferred_url: str) -> List[str]:
-    """排序失败时：先模型指定 URL，再保持搜索返回顺序。"""
-    prefer_n = _normalized_url(preferred_url)
-    urls: List[str] = []
-    if prefer_n:
-        for item in candidates:
-            if _normalized_url(item.get("url")) == prefer_n:
-                urls.append(str(item["url"]))
-                break
-    for item in candidates:
-        u = str(item.get("url") or "")
-        if not u or _normalized_url(u) in {_normalized_url(x) for x in urls}:
-            continue
-        urls.append(u)
-    return urls
+_LOCAL_RANK_STOP_TOKENS = {
+    "一个", "一些", "一下", "为什么", "什么", "如何", "怎么", "是否",
+    "可以", "需要", "这个", "那个", "现在", "最新", "相关", "信息",
+    "问题", "结果", "网页", "网站", "帮我", "看看", "介绍", "情况",
+    "the", "and", "for", "with", "from", "what", "when", "where",
+    "which", "how", "why", "about", "latest", "information", "page",
+}
 
 
-def _parse_ranked_urls(text: str, allowed: Dict[str, str]) -> List[str]:
-    """
-    从模型输出解析 URL 优先级列表。
-    allowed: normalized_url -> original_url
-    """
-    if not text or not allowed:
-        return []
-    raw = text.strip()
-    # 去掉 ```json 包裹
-    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, re.I)
-    if fence:
-        raw = fence.group(1).strip()
-    data = None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        m = re.search(r"\[[\s\S]*\]", raw)
-        if m:
-            try:
-                data = json.loads(m.group(0))
-            except json.JSONDecodeError:
-                data = None
-    urls: List[str] = []
-    if isinstance(data, dict):
-        data = data.get("urls") or data.get("ranked") or data.get("order") or []
-    if not isinstance(data, list):
-        return []
-    for item in data:
-        if isinstance(item, str):
-            u = item.strip()
-        elif isinstance(item, dict):
-            u = str(item.get("url") or "").strip()
-        else:
-            continue
-        n = _normalized_url(u)
-        if n in allowed and allowed[n] not in urls:
-            urls.append(allowed[n])
-    return urls
+def _relevance_tokens(text: str) -> set:
+    """低成本中英文分词：英文词/型号 + 中文二至四元短语。"""
+    value = str(text or "").lower()
+    tokens = set()
+    for raw in re.findall(r"[a-z0-9]+(?:[._+\-][a-z0-9]+)*", value):
+        if len(raw) >= 2:
+            tokens.add(raw)
+        for part in re.split(r"[^a-z0-9]+", raw):
+            if len(part) >= 2:
+                tokens.add(part)
+    for sequence in re.findall(r"[\u4e00-\u9fff]+", value):
+        for size in (2, 3, 4):
+            if len(sequence) < size:
+                continue
+            for index in range(len(sequence) - size + 1):
+                tokens.add(sequence[index : index + size])
+    return {token for token in tokens if token not in _LOCAL_RANK_STOP_TOKENS}
 
 
-async def _rank_scrape_candidates_by_model(
+def _token_weight(token: str) -> float:
+    if any(char.isdigit() for char in token):
+        return 4.0
+    if re.fullmatch(r"[a-z0-9._+\-]+", token):
+        return 2.5 if len(token) >= 5 else 1.5
+    return 2.5 if len(token) >= 4 else 1.5 if len(token) == 3 else 1.0
+
+
+def _candidate_relevance_score(candidate: dict, reference: str) -> float:
+    query_tokens = _relevance_tokens(reference)
+    title = str(candidate.get("title") or "")
+    snippet = str(candidate.get("snippet") or "")
+    title_tokens = _relevance_tokens(title)
+    snippet_tokens = _relevance_tokens(snippet)
+    score = 4.0 * sum(
+        _token_weight(token) for token in query_tokens & title_tokens
+    )
+    score += sum(_token_weight(token) for token in query_tokens & snippet_tokens)
+
+    # 年份、数值、产品型号的精确重合比普通词更能区分具体结果。
+    entity_pattern = r"[a-z]*\d+[a-z0-9._+\-]*"
+    query_entities = set(re.findall(entity_pattern, reference.lower()))
+    candidate_entities = set(
+        re.findall(entity_pattern, f"{title} {snippet}".lower())
+    )
+    score += 6.0 * len(query_entities & candidate_entities)
+
+    url = str(candidate.get("url") or "")
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "").lower()
+    title_lower = title.lower()
+    if host.endswith((".gov", ".gov.cn", ".edu", ".edu.cn")):
+        score += 4.0
+    if host in {"arxiv.org", "github.com"} or host.startswith(
+        ("docs.", "developer.", "support.", "research.")
+    ):
+        score += 2.5
+    if path.endswith(".pdf") or any(
+        marker in title_lower
+        for marker in ("官网", "官方", "文档", "手册", "documentation", "manual", "specification")
+    ):
+        score += 2.0
+    if "/search" in path or any(
+        marker in title_lower for marker in ("搜索结果", "商品搜索", "登录")
+    ):
+        score -= 4.0
+    return score
+
+
+def _rank_scrape_candidates_locally(
     messages: List[dict],
     candidates: List[dict],
-    preferred_url: str,
-    model: str,
+    requested_url: str,
 ) -> List[str]:
-    """
-    抓取前：用当前模型根据标题/摘要对全部搜索结果排序。
-    返回 original URL 列表；失败则空列表（调用方回退搜索顺序）。
-    """
-    if len(candidates) <= 1:
-        return [str(c["url"]) for c in candidates]
-
-    allowed = {_normalized_url(c["url"]): str(c["url"]) for c in candidates}
-    question = _latest_user_question(messages)
-    lines = []
-    for i, c in enumerate(candidates, 1):
-        lines.append(
-            f"{i}. title: {c.get('title') or '(无标题)'}\n"
-            f"   url: {c.get('url')}\n"
-            f"   snippet: {c.get('snippet') or '(无摘要)'}"
+    """纯本地排序；模型点名 URL 固定第一，其余按相关性与原顺序排列。"""
+    if not candidates:
+        return []
+    reference = "\n".join(
+        part
+        for part in (
+            _latest_user_question(messages),
+            _search_query_for_url(messages, requested_url),
         )
-    prefer_note = (
-        f"助手拟优先打开的 URL：{preferred_url}\n"
-        if preferred_url
-        else ""
+        if part
     )
-    prompt = (
-        "你是网页阅读优先级排序器。根据用户问题与各结果的标题/摘要，"
-        "判断「最可能包含完整有用正文」的阅读顺序。\n"
-        "只输出一个 JSON 数组，元素为 url 字符串，从最优先到最不优先。"
-        "必须且只能使用下面给出的 url，不要编造，不要输出解释。\n\n"
-        f"用户问题：\n{question or '(未知)'}\n\n"
-        f"{prefer_note}"
-        f"候选（共 {len(candidates)} 条）：\n" + "\n".join(lines)
+    requested_n = _normalized_url(requested_url)
+    preferred = []
+    remainder = []
+    for index, candidate in enumerate(candidates):
+        url = str(candidate.get("url") or "")
+        if requested_n and _normalized_url(url) == requested_n:
+            preferred.append(url)
+            continue
+        remainder.append(
+            (
+                -_candidate_relevance_score(candidate, reference),
+                index,
+                url,
+            )
+        )
+    remainder.sort()
+    ranked = preferred[:1] + [url for _, _, url in remainder if url]
+    logger.info(
+        "scrape local rank: %s candidates, requested_first=%s",
+        len(ranked),
+        bool(preferred),
     )
-    try:
-        data = await _call_llm_with_model(
-            [
-                {
-                    "role": "system",
-                    "content": "只输出 JSON 字符串数组，不要 Markdown，不要其它文字。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            model=model,
-            with_tools=False,
-        )
-        content = (
-            ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
-            or ""
-        )
-        if isinstance(content, list):
-            content = "".join(
-                str(part.get("text") or "")
-                if isinstance(part, dict)
-                else str(part)
-                for part in content
-            )
-        ranked = _parse_ranked_urls(str(content), allowed)
-        # 补全模型漏掉的 url，保持相对稳定：按原候选顺序追加
-        if ranked:
-            have = {_normalized_url(u) for u in ranked}
-            for c in candidates:
-                n = _normalized_url(c["url"])
-                if n not in have:
-                    ranked.append(str(c["url"]))
-            logger.info(
-                "scrape rank by model: %s urls, preferred=%s",
-                len(ranked),
-                (preferred_url or "")[:120],
-            )
-            return ranked
-    except Exception as exc:
-        logger.warning("scrape candidate ranking failed: %s", type(exc).__name__)
-    return []
+    return ranked
 
 
 async def _run_scrape_url_tool_once(
     messages: List[dict],
     arguments: Any,
-    model: Optional[str] = None,
     state: Optional[ScrapeRunState] = None,
 ) -> str:
     """
     一次 scrape_url：只在请求 URL 所属搜索批次内排序与换源。
     失败候选不进入上下文；每个成功 URL 的正文最多注入一次。
     """
-    use_model = model or MODEL_NAME
     active_state = state or ScrapeRunState()
     try:
         args = (
@@ -867,20 +872,11 @@ async def _run_scrape_url_tool_once(
             resolution_reason=reason,
         )
 
-    preferred_for_rank = (
-        requested_url
-        if req_n not in active_state.attempted_urls
-        and req_n not in active_state.injected_urls
-        else ""
-    )
-    ranked_urls = await _rank_scrape_candidates_by_model(
+    ranked_urls = _rank_scrape_candidates_locally(
         messages,
         candidates,
-        preferred_url=preferred_for_rank,
-        model=use_model,
+        requested_url=requested_url,
     )
-    if not ranked_urls:
-        ranked_urls = _fallback_rank_urls(candidates, preferred_for_rank)
 
     n_tried = 0
     for current_url in ranked_urls:
@@ -1479,7 +1475,6 @@ async def run_agent_stream(
                 tool_calls,
                 message,
                 budget.max_search_results,
-                model=use_model,
                 scrape_state=scrape_state,
             )
             tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
@@ -1514,7 +1509,6 @@ async def run_agent_stream(
                     tool_calls,
                     message,
                     budget.max_search_results,
-                    model=use_model,
                     scrape_state=scrape_state,
                 )
                 tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
@@ -1753,7 +1747,6 @@ async def run_agent_sync(
                 tool_calls,
                 message,
                 budget.max_search_results,
-                model=use_model,
                 scrape_state=scrape_state,
             )
             tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
@@ -1778,7 +1771,6 @@ async def run_agent_sync(
                     tool_calls,
                     message,
                     budget.max_search_results,
-                    model=use_model,
                     scrape_state=scrape_state,
                 )
                 tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
