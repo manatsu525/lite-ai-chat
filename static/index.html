@@ -333,6 +333,48 @@
       height: 14px;
       pointer-events: none;
     }
+    .usage-panel {
+      margin-top: 0.5rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+    .usage-panel > summary {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.3rem;
+      width: fit-content;
+      max-width: 100%;
+      padding: 0.22rem 0.4rem;
+      cursor: pointer;
+      list-style: none;
+      border: 1px solid rgba(154, 160, 166, 0.16);
+      border-radius: 6px;
+      background: rgba(154, 160, 166, 0.055);
+    }
+    .usage-panel > summary::-webkit-details-marker { display: none; }
+    .usage-panel > summary::before {
+      content: "›";
+      font-size: 0.9rem;
+      transition: transform 0.15s ease;
+    }
+    .usage-panel[open] > summary::before { transform: rotate(90deg); }
+    .usage-state {
+      padding: 0.06rem 0.3rem;
+      border-radius: 999px;
+      background: rgba(108, 158, 255, 0.12);
+      font-size: 0.68rem;
+    }
+    .usage-details {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.28rem 0.7rem;
+      margin-top: 0.35rem;
+      padding: 0.45rem 0.5rem;
+      border-left: 2px solid rgba(108, 158, 255, 0.3);
+      background: rgba(154, 160, 166, 0.045);
+    }
+    .usage-details span { overflow-wrap: anywhere; }
     .msg .content ul, .msg .content ol {
       margin: 0.45rem 0;
       padding-left: 1.5rem;
@@ -1082,6 +1124,7 @@
           messageIndex: index,
           showActions: true,
           trace: item.trace || [],
+          usage: item.usage || {},
         });
       });
     }
@@ -1121,6 +1164,8 @@
         role: message.role,
         content: message.content || "",
         trace: Array.isArray(message.trace) ? message.trace : [],
+        usage: message.usage && typeof message.usage === "object"
+          ? message.usage : {},
       }));
       renderConversationSelect();
       renderConversation();
@@ -1195,6 +1240,8 @@
         role: message.role,
         content: message.content,
         trace: Array.isArray(message.trace) ? message.trace : [],
+        usage: message.usage && typeof message.usage === "object"
+          ? message.usage : {},
       }));
       item.updated_at = new Date().toISOString();
       conversations = [item, ...conversations.filter((entry) => entry.id !== item.id)].slice(0, 10);
@@ -2091,6 +2138,64 @@
       container.insertBefore(panel, content || null);
     }
 
+    function usageNumber(value) {
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+    }
+
+    function formatTokenCount(value) {
+      return new Intl.NumberFormat("zh-CN").format(usageNumber(value));
+    }
+
+    function renderUsagePanel(container, rawUsage, active = false) {
+      if (!container) return;
+      const previous = container.querySelector(".usage-panel");
+      const wasOpen = Boolean(previous && previous.open);
+      if (previous) previous.remove();
+      const usage = rawUsage && typeof rawUsage === "object" ? rawUsage : {};
+      const calls = usageNumber(usage.api_calls);
+      const prompt = usageNumber(usage.prompt_tokens);
+      const completion = usageNumber(usage.completion_tokens);
+      const total = usageNumber(usage.total_tokens);
+      if (!calls && !prompt && !completion && !total) return;
+
+      const panel = document.createElement("details");
+      panel.className = "usage-panel";
+      panel.open = wasOpen;
+      const summary = document.createElement("summary");
+      const label = document.createElement("span");
+      label.textContent =
+        calls + " 次调用 · 输入 " + formatTokenCount(prompt) +
+        " · 输出 " + formatTokenCount(completion) +
+        " · 总计 " + formatTokenCount(total) + " token";
+      summary.appendChild(label);
+      const state = document.createElement("span");
+      state.className = "usage-state";
+      state.textContent = active
+        ? "统计中"
+        : usage.complete ? "完整" : "部分统计";
+      summary.appendChild(state);
+      panel.appendChild(summary);
+
+      const details = document.createElement("div");
+      details.className = "usage-details";
+      const rows = [
+        ["上报调用", formatTokenCount(usage.reported_calls) + "/" + formatTokenCount(calls)],
+        ["缓存 token", formatTokenCount(usage.cached_tokens)],
+        ["Reasoning token", formatTokenCount(usage.reasoning_tokens)],
+        ["清理旧思考", formatTokenCount(usage.pruned_reasoning_blocks) +
+          " 段 / " + formatTokenCount(usage.pruned_reasoning_chars) + " 字符"],
+      ];
+      for (const row of rows) {
+        const item = document.createElement("span");
+        item.textContent = row[0] + "：" + row[1];
+        details.appendChild(item);
+      }
+      panel.appendChild(details);
+      const actions = container.querySelector(".message-actions");
+      container.insertBefore(panel, actions || null);
+    }
+
     function appendMsg(role, content, isStatus, options = {}) {
       removeEmpty();
       const messagesEl = $("messages");
@@ -2116,6 +2221,9 @@
           Boolean(options.traceActive),
           options.statusMessage || "",
         );
+      }
+      if (!isStatus && role === "assistant") {
+        renderUsagePanel(div, options.usage || {}, Boolean(options.usageActive));
       }
       if (
         !isStatus &&
@@ -2304,6 +2412,8 @@
           role: message.role,
           content: message.content || "",
           trace: Array.isArray(message.trace) ? message.trace : [],
+          usage: message.usage && typeof message.usage === "object"
+            ? message.usage : {},
         }));
         renderConversationSelect();
         renderConversation();
@@ -2317,6 +2427,8 @@
           trace: job.trace || [],
           traceActive: true,
           statusMessage: job.status_message || "后台生成中…",
+          usage: job.usage || {},
+          usageActive: true,
         },
       );
       return { contentEl };
@@ -2359,6 +2471,11 @@
               job.status === "stopping" ? "正在停止…" : "后台生成中…"
             ),
           );
+          renderUsagePanel(
+            contentEl.closest(".msg"),
+            job.usage || {},
+            active,
+          );
           if (active) {
             jobPollTimer = setTimeout(poll, 900);
             return;
@@ -2371,10 +2488,12 @@
               role: "assistant",
               content: finalContent,
               trace: job.trace || [],
+              usage: job.usage || {},
             });
           } else {
             last.content = finalContent;
             last.trace = job.trace || [];
+            last.usage = job.usage || {};
           }
           addMessageActions(
             contentEl.closest(".msg"),
@@ -2389,6 +2508,8 @@
               role: message.role,
               content: message.content,
               trace: Array.isArray(message.trace) ? message.trace : [],
+              usage: message.usage && typeof message.usage === "object"
+                ? message.usage : {},
             }));
             conversation.updated_at = new Date().toISOString();
             conversations = [
@@ -2446,6 +2567,7 @@
               role: m.role,
               content: m.content,
               trace: Array.isArray(m.trace) ? m.trace : [],
+              usage: m.usage && typeof m.usage === "object" ? m.usage : {},
             })),
             conversation_id: currentConversationId,
             title: currentTitle(),

@@ -14,7 +14,21 @@ _attachment_job_lock = asyncio.Lock()
 
 
 def clean_usage(value: Any) -> dict:
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or not value:
+        return {}
+    known_keys = {
+        "api_calls",
+        "reported_calls",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+        "pruned_reasoning_chars",
+        "pruned_reasoning_blocks",
+        "complete",
+    }
+    if not known_keys.intersection(value):
         return {}
     cleaned = {}
     for key in (
@@ -118,6 +132,7 @@ def _persist_answer(
     messages: List[dict],
     content: str,
     trace: Optional[List[dict]] = None,
+    usage: Optional[dict] = None,
 ) -> None:
     conversation_messages = []
     for item in messages:
@@ -127,12 +142,18 @@ def _persist_answer(
         old_trace = clean_trace(item.get("trace"))
         if old_trace and item.get("role") == "assistant":
             message["trace"] = old_trace
+        old_usage = clean_usage(item.get("usage"))
+        if old_usage and item.get("role") == "assistant":
+            message["usage"] = old_usage
         conversation_messages.append(message)
     if content:
         answer = {"role": "assistant", "content": content}
         current_trace = clean_trace(trace)
         if current_trace:
             answer["trace"] = current_trace
+        current_usage = clean_usage(usage)
+        if current_usage:
+            answer["usage"] = current_usage
         conversation_messages.append(answer)
     users.save_conversation(
         user_id,
@@ -234,6 +255,7 @@ async def _run_job(
             messages,
             content,
             trace,
+            usage,
         )
         users.update_chat_job(
             job_id, "completed", content, "", trace=trace, usage=usage
@@ -251,6 +273,7 @@ async def _run_job(
             messages,
             stopped_content,
             trace,
+            usage,
         )
         users.update_chat_job(
             job_id, "stopped", stopped_content, "", trace=trace, usage=usage
@@ -265,6 +288,7 @@ async def _run_job(
             messages,
             failed_content,
             trace,
+            usage,
         )
         users.update_chat_job(
             job_id,

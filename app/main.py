@@ -142,6 +142,7 @@ class ChatMessage(BaseModel):
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
     trace: Optional[List[dict]] = None
+    usage: Optional[dict] = None
 
 
 class ChatRequest(BaseModel):
@@ -647,6 +648,9 @@ def save_conversation(
         trace = jobs.clean_trace(message.trace)
         if trace and message.role == "assistant":
             messages[-1]["trace"] = trace
+        usage = jobs.clean_usage(message.usage)
+        if usage and message.role == "assistant":
+            messages[-1]["usage"] = usage
     title = body.title.strip()[:100] or "新对话"
     users.save_conversation(user["id"], conversation_id, title, messages)
     return {"ok": True}
@@ -681,6 +685,9 @@ async def create_chat_job(body: ChatJobBody, user: dict = Depends(require_user))
         trace = jobs.clean_trace(message.trace)
         if trace and message.role == "assistant":
             item["trace"] = trace
+        usage = jobs.clean_usage(message.usage)
+        if usage and message.role == "assistant":
+            item["usage"] = usage
         clean.append(item)
     if not clean:
         raise HTTPException(status_code=400, detail="messages 不能为空")
