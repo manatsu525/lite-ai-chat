@@ -395,6 +395,13 @@ def _prune_stale_reasoning_content(
     return removed_blocks, removed_chars
 
 
+def _requires_full_reasoning_history(model_config: dict) -> bool:
+    """DeepSeek 思考模式要求回传每一轮 reasoning_content，不能裁剪。"""
+    provider = str(model_config.get("provider") or "").lower()
+    model_id = str(model_config.get("model_id") or "").lower()
+    return provider == "deepseek" or "deepseek" in model_id
+
+
 class ToolUseFailed(Exception):
     """Groq 返回 tool_use_failed，已解析出 synthetic tool_calls。"""
 
@@ -414,7 +421,8 @@ async def _call_llm_with_model(
     if not model_config:
         raise RuntimeError(f"模型未配置或不可用: {model}")
 
-    _prune_stale_reasoning_content(messages, usage)
+    if not _requires_full_reasoning_history(model_config):
+        _prune_stale_reasoning_content(messages, usage)
 
     body: Dict[str, Any] = {
         "model": model_config["model_id"],
@@ -1791,7 +1799,8 @@ async def _call_llm_final_stream(
         raise RuntimeError(f"模型未配置或不可用: {model}")
 
     active_usage = usage or TokenUsage()
-    _prune_stale_reasoning_content(messages, active_usage)
+    if not _requires_full_reasoning_history(model_config):
+        _prune_stale_reasoning_content(messages, active_usage)
 
     # 清理历史里可能让上游困惑的 tool 结构：保留，但去掉 tools 参数
     body = {
