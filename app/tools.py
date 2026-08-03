@@ -14,7 +14,9 @@ from .config import (
     HTTP_TIMEOUT,
     MAX_SEARCH_RESULTS,
     SCRAPER_URL,
+    SEARXNG_DEFAULT_ENGINES,
     SEARXNG_URL,
+    get_searxng_enabled_engines,
 )
 
 logger = logging.getLogger("lite-ai-chat.tools")
@@ -714,7 +716,7 @@ async def _open_meteo_weather(query: str, n: int) -> list:
     ][:n]
 
 
-async def _searx_search(query: str, n: int) -> list:
+async def _searx_payload(query: str, engines: list[str]) -> dict:
     # 聚合多个引擎通常需要 5-8 秒，不能沿用单一搜索源的短超时。
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(12.0, connect=_CONNECT_TIMEOUT),
@@ -722,29 +724,134 @@ async def _searx_search(query: str, n: int) -> list:
     ) as client:
         r = await client.get(
             f"{SEARXNG_URL}/search",
-            params={"q": query, "format": "json", "categories": "general"},
+            params={
+                "q": query,
+                "format": "json",
+                "engines": ",".join(engines),
+            },
             headers={"Accept": "application/json"},
         )
         ct = r.headers.get("content-type", "")
         if r.status_code != 200 or "json" not in ct:
-            return []
+            raise RuntimeError(f"SearXNG HTTP {r.status_code}")
         data = r.json()
-        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
-            return []
-        out = []
-        for item in data["results"][:n]:
-            url = item.get("url") or item.get("link") or ""
-            if not url:
-                continue
-            out.append(
-                {
-                    "title": item.get("title") or "",
-                    "url": url,
-                    "snippet": item.get("content") or item.get("snippet") or "",
-                    "engines": item.get("engines") or [],
-                }
-            )
-        return out
+        if not isinstance(data, dict):
+            raise RuntimeError("SearXNG 返回格式错误")
+        return data
+
+
+async def list_searxng_engines() -> list[dict]:
+    """从正在运行的 SearXNG 动态列出全部 general 引擎。"""
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(8.0, connect=_CONNECT_TIMEOUT),
+        follow_redirects=True,
+    ) as client:
+        r = await client.get(
+            f"{SEARXNG_URL}/config",
+            headers={"Accept": "application/json"},
+        )
+    if r.status_code != 200:
+        raise RuntimeError(f"SearXNG config HTTP {r.status_code}")
+    data = r.json()
+    engines = []
+    seen = set()
+    for item in data.get("engines") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        categories = [str(value) for value in (item.get("categories") or [])]
+        if not name or name in seen or "general" not in categories:
+            continue
+        seen.add(name)
+        engines.append(
+            {
+                "id": name,
+                "label": name,
+                "shortcut": str(item.get("shortcut") or ""),
+                "categories": categories,
+            }
+        )
+    default_order = {name: index for index, name in enumerate(SEARXNG_DEFAULT_ENGINES)}
+    engines.sort(
+        key=lambda item: (
+            0 if item["id"] in default_order else 1,
+            default_order.get(item["id"], 999),
+            item["label"].casefold(),
+        )
+    )
+    return engines
+
+
+def _searx_results_from_payload(data: dict, n: int) -> list:
+    out = []
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url") or item.get("link") or ""
+        if not url:
+            continue
+        out.append(
+            {
+                "title": item.get("title") or "",
+                "url": url,
+                "snippet": item.get("content") or item.get("snippet") or "",
+                "engines": item.get("engines") or [],
+            }
+        )
+        if len(out) >= n:
+            return out
+
+    # SearXNG 的 Wikipedia 引擎返回 infoboxes 而非 results；把它转换成
+    # 普通搜索卡片，否则界面显示“可用”但聊天搜索永远拿不到 Wikipedia。
+    for item in data.get("infoboxes") or []:
+        if not isinstance(item, dict):
+            continue
+        urls = item.get("urls") or []
+        first_url = urls[0].get("url") if urls and isinstance(urls[0], dict) else ""
+        url = item.get("url") or item.get("id") or first_url or ""
+        if not str(url).startswith(("http://", "https://")):
+            continue
+        out.append(
+            {
+                "title": item.get("infobox") or item.get("title") or "Wikipedia",
+                "url": url,
+                "snippet": item.get("content") or "",
+                "engines": item.get("engines") or [item.get("engine") or "wikipedia"],
+            }
+        )
+        if len(out) >= n:
+            break
+    return out
+
+
+async def _searx_search(query: str, n: int) -> list:
+    engines = get_searxng_enabled_engines()
+    if not engines:
+        return []
+    data = await _searx_payload(query, engines)
+    return _searx_results_from_payload(data, n)
+
+
+async def test_searxng_engine(engine: str, query: str = "OpenAI") -> dict:
+    """管理员设置页使用的真实单引擎测试，不受当前开关状态影响。"""
+    allowed = {item["id"] for item in await list_searxng_engines()}
+    if engine not in allowed:
+        raise ValueError("不支持的 SearXNG 引擎")
+    data = await _searx_payload(query.strip() or "OpenAI", [engine])
+    results = _trim_search_results(_searx_results_from_payload(data, 3), 3)
+    unresponsive = data.get("unresponsive_engines") or []
+    return {
+        "engine": engine,
+        "ok": bool(results),
+        "result_count": len(results),
+        "results": results,
+        "unresponsive_engines": unresponsive,
+        "message": (
+            f"测试成功，取得 {len(results)} 条结果"
+            if results
+            else "请求完成，但没有解析到有效结果"
+        ),
+    }
 
 
 async def _mojeek_search(query: str, n: int) -> list:
@@ -973,42 +1080,37 @@ async def web_search(query: str, num_results: int = None) -> str:
     except Exception as e:
         logger.info("searxng backend fail: %s", type(e).__name__)
 
-    backends = [
-        ("bing", _bing_rss_search(query, n)),
-        ("wikipedia", _wikipedia_search(query, n)),
-        ("mojeek", _mojeek_search(query, n)),
-        ("google_news", _google_news_rss(query, n)),
-        ("duckduckgo", _ddg_lite_search(query, n)),
-    ]
-
-    tasks = [asyncio.create_task(_run_backend(name, coro)) for name, coro in backends]
     source = None
     results: list = []
     errors = []
 
-    try:
-        # 总竞速窗口
-        done_names = []
-        for fut in asyncio.as_completed(tasks, timeout=_SEARCH_TIMEOUT + 2):
-            try:
-                name, res = await fut
-            except Exception as e:
-                errors.append(str(type(e).__name__))
-                continue
-            done_names.append(name)
-            if res:
-                source = name
-                results = res
-                break
-            errors.append(f"{name}: empty")
-    except asyncio.TimeoutError:
-        errors.append("race: timeout")
-    finally:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        # 回收 cancel
-        await asyncio.gather(*tasks, return_exceptions=True)
+    # 确定性优先级：先单独尝试实测可直接访问的 DuckDuckGo；中间三个
+    # 并行以免串行拖慢，但仍按固定顺序选结果；不稳定且曾返回错位结果的
+    # Bing RSS 只在所有其他来源都为空时最后尝试。
+    name, res = await _run_backend("duckduckgo", _ddg_lite_search(query, n))
+    if res:
+        source, results = name, res
+    else:
+        errors.append("duckduckgo: empty")
+
+    if not results:
+        middle = await asyncio.gather(
+            _run_backend("wikipedia", _wikipedia_search(query, n)),
+            _run_backend("mojeek", _mojeek_search(query, n)),
+            _run_backend("google_news", _google_news_rss(query, n)),
+        )
+        for name, res in middle:
+            if res and not results:
+                source, results = name, res
+            elif not res:
+                errors.append(f"{name}: empty")
+
+    if not results:
+        name, res = await _run_backend("bing", _bing_rss_search(query, n))
+        if res:
+            source, results = name, res
+        else:
+            errors.append("bing: empty")
 
     if not results:
         return json.dumps(

@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import attachments, jobs, users
+from . import attachments, jobs, tools, users
 from .agent import run_agent_stream, run_agent_sync
 from .auth import create_token, require_admin, require_user
 from .config import (
@@ -34,9 +34,11 @@ from .config import (
     delete_provider_config,
     get_model_config,
     get_provider_secret,
+    get_searxng_enabled_engines,
     provider_settings_public,
     public_model_options,
     save_provider_config,
+    save_searxng_enabled_engines,
 )
 
 users.init_db()
@@ -170,6 +172,15 @@ class ProviderBody(BaseModel):
     api_base: str = Field(min_length=8, max_length=500)
     api_key: str = Field(default="", max_length=1000)
     selected_models: List[str] = Field(default_factory=list, max_length=500)
+
+
+class SearxSettingsBody(BaseModel):
+    enabled_engines: List[str] = Field(default_factory=list, max_length=100)
+
+
+class SearxTestBody(BaseModel):
+    engine: str = Field(min_length=1, max_length=40)
+    query: str = Field(default="OpenAI", min_length=1, max_length=200)
 
 
 class ConversationBody(BaseModel):
@@ -584,6 +595,69 @@ def delete_provider(provider_id: str, user: dict = Depends(require_admin)):
         raise HTTPException(status_code=400, detail="无效的提供商标识")
     delete_provider_config(provider_id)
     return {"ok": True, "models": public_model_options()}
+
+
+# ---------- SearXNG 设置（仅管理员） ----------
+@app.get("/api/settings/searxng")
+async def searxng_settings(user: dict = Depends(require_admin)):
+    try:
+        catalog = await asyncio.wait_for(tools.list_searxng_engines(), timeout=10.0)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="无法读取 SearXNG 引擎列表") from exc
+    enabled = set(get_searxng_enabled_engines())
+    return {
+        "engines": [
+            {**engine, "enabled": engine["id"] in enabled}
+            for engine in catalog
+        ]
+    }
+
+
+@app.put("/api/settings/searxng")
+async def update_searxng_settings(
+    body: SearxSettingsBody,
+    user: dict = Depends(require_admin),
+):
+    try:
+        catalog = await asyncio.wait_for(tools.list_searxng_engines(), timeout=10.0)
+        save_searxng_enabled_engines(
+            body.enabled_engines,
+            [engine["id"] for engine in catalog],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="无法读取 SearXNG 引擎列表") from exc
+    enabled = set(get_searxng_enabled_engines())
+    return {
+        "ok": True,
+        "engines": [
+            {**engine, "enabled": engine["id"] in enabled}
+            for engine in catalog
+        ],
+    }
+
+
+@app.post("/api/settings/searxng/test")
+async def test_searxng_setting(
+    body: SearxTestBody,
+    user: dict = Depends(require_admin),
+):
+    try:
+        return await asyncio.wait_for(
+            tools.test_searxng_engine(body.engine, body.query),
+            timeout=15.0,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="SearXNG 单引擎测试超时") from exc
+    except Exception as exc:
+        logger.info("SearXNG 单引擎测试失败: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail=f"SearXNG 请求失败：{type(exc).__name__}",
+        ) from exc
 
 
 # ---------- 最近 10 个对话 ----------
