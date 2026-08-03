@@ -14,7 +14,7 @@ from .config import (
     HTTP_TIMEOUT,
     MAX_SEARCH_RESULTS,
     SCRAPER_URL,
-    SEARXNG_ENGINES,
+    SEARXNG_DEFAULT_ENGINES,
     SEARXNG_URL,
     get_searxng_enabled_engines,
 )
@@ -740,6 +740,48 @@ async def _searx_payload(query: str, engines: list[str]) -> dict:
         return data
 
 
+async def list_searxng_engines() -> list[dict]:
+    """从正在运行的 SearXNG 动态列出全部 general 引擎。"""
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(8.0, connect=_CONNECT_TIMEOUT),
+        follow_redirects=True,
+    ) as client:
+        r = await client.get(
+            f"{SEARXNG_URL}/config",
+            headers={"Accept": "application/json"},
+        )
+    if r.status_code != 200:
+        raise RuntimeError(f"SearXNG config HTTP {r.status_code}")
+    data = r.json()
+    engines = []
+    seen = set()
+    for item in data.get("engines") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        categories = [str(value) for value in (item.get("categories") or [])]
+        if not name or name in seen or "general" not in categories:
+            continue
+        seen.add(name)
+        engines.append(
+            {
+                "id": name,
+                "label": name,
+                "shortcut": str(item.get("shortcut") or ""),
+                "categories": categories,
+            }
+        )
+    default_order = {name: index for index, name in enumerate(SEARXNG_DEFAULT_ENGINES)}
+    engines.sort(
+        key=lambda item: (
+            0 if item["id"] in default_order else 1,
+            default_order.get(item["id"], 999),
+            item["label"].casefold(),
+        )
+    )
+    return engines
+
+
 def _searx_results_from_payload(data: dict, n: int) -> list:
     out = []
     for item in data.get("results") or []:
@@ -792,7 +834,7 @@ async def _searx_search(query: str, n: int) -> list:
 
 async def test_searxng_engine(engine: str, query: str = "OpenAI") -> dict:
     """管理员设置页使用的真实单引擎测试，不受当前开关状态影响。"""
-    allowed = {item["id"] for item in SEARXNG_ENGINES}
+    allowed = {item["id"] for item in await list_searxng_engines()}
     if engine not in allowed:
         raise ValueError("不支持的 SearXNG 引擎")
     data = await _searx_payload(query.strip() or "OpenAI", [engine])

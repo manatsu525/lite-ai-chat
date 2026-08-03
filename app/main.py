@@ -34,11 +34,11 @@ from .config import (
     delete_provider_config,
     get_model_config,
     get_provider_secret,
+    get_searxng_enabled_engines,
     provider_settings_public,
     public_model_options,
     save_provider_config,
     save_searxng_enabled_engines,
-    searxng_settings_public,
 )
 
 users.init_db()
@@ -175,7 +175,7 @@ class ProviderBody(BaseModel):
 
 
 class SearxSettingsBody(BaseModel):
-    enabled_engines: List[str] = Field(default_factory=list, max_length=3)
+    enabled_engines: List[str] = Field(default_factory=list, max_length=100)
 
 
 class SearxTestBody(BaseModel):
@@ -599,20 +599,43 @@ def delete_provider(provider_id: str, user: dict = Depends(require_admin)):
 
 # ---------- SearXNG 设置（仅管理员） ----------
 @app.get("/api/settings/searxng")
-def searxng_settings(user: dict = Depends(require_admin)):
-    return {"engines": searxng_settings_public()}
+async def searxng_settings(user: dict = Depends(require_admin)):
+    try:
+        catalog = await asyncio.wait_for(tools.list_searxng_engines(), timeout=10.0)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="无法读取 SearXNG 引擎列表") from exc
+    enabled = set(get_searxng_enabled_engines())
+    return {
+        "engines": [
+            {**engine, "enabled": engine["id"] in enabled}
+            for engine in catalog
+        ]
+    }
 
 
 @app.put("/api/settings/searxng")
-def update_searxng_settings(
+async def update_searxng_settings(
     body: SearxSettingsBody,
     user: dict = Depends(require_admin),
 ):
     try:
-        save_searxng_enabled_engines(body.enabled_engines)
+        catalog = await asyncio.wait_for(tools.list_searxng_engines(), timeout=10.0)
+        save_searxng_enabled_engines(
+            body.enabled_engines,
+            [engine["id"] for engine in catalog],
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "engines": searxng_settings_public()}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="无法读取 SearXNG 引擎列表") from exc
+    enabled = set(get_searxng_enabled_engines())
+    return {
+        "ok": True,
+        "engines": [
+            {**engine, "enabled": engine["id"] in enabled}
+            for engine in catalog
+        ],
+    }
 
 
 @app.post("/api/settings/searxng/test")

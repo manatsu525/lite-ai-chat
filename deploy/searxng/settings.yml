@@ -38,6 +38,7 @@ engines:
   # 旧安装曾显式启用这些引擎；明确恢复为关闭，避免直接访问
   # SearXNG general 分类时再次同时请求它们。
   - name: google
+    inactive: false
     disabled: true
   - name: baidu
     disabled: true

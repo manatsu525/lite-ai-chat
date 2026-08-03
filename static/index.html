@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Lite AI Chat</title>
   <style>
     :root {
@@ -34,6 +34,8 @@
       overflow: hidden;
       display: flex;
       flex-direction: column;
+      width: 100%;
+      max-width: 100%;
     }
     button, input, textarea, select {
       font: inherit;
@@ -129,11 +131,24 @@
       align-items: center;
       justify-content: space-between;
       padding: 0.7rem 1rem;
+      padding-left: calc(1rem + env(safe-area-inset-left));
+      padding-right: calc(1rem + env(safe-area-inset-right));
+      width: 100%;
+      min-width: 0;
+      max-width: 100vw;
       border-bottom: 1px solid var(--border);
       background: var(--panel);
     }
-    header .brand { font-weight: 700; letter-spacing: 0.02em; }
-    header .user-meta { color: var(--muted); font-size: 0.85rem; display: flex; gap: 0.6rem; align-items: center; }
+    header .brand { min-width: 0; font-weight: 700; letter-spacing: 0.02em; }
+    header .user-meta {
+      min-width: 0;
+      max-width: 100%;
+      color: var(--muted);
+      font-size: 0.85rem;
+      display: flex;
+      gap: 0.6rem;
+      align-items: center;
+    }
     .model-controls {
       display: flex;
       align-items: center;
@@ -180,11 +195,13 @@
       text-align: center;
       white-space: nowrap;
     }
-    @media (max-width: 680px) {
+    @media (max-width: 900px) {
       header {
         align-items: center;
         gap: 0.4rem;
         padding: 0.4rem 0.55rem;
+        padding-left: calc(0.55rem + env(safe-area-inset-left));
+        padding-right: calc(0.55rem + env(safe-area-inset-right));
       }
       header .brand {
         width: 2.5rem;
@@ -195,9 +212,10 @@
       header .user-meta {
         flex: 1;
         min-width: 0;
+        max-width: calc(100% - 2.9rem);
         display: grid;
-        grid-template-columns: repeat(4, max-content);
-        justify-content: end;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        justify-content: stretch;
         gap: 0.3rem;
         font-size: 0.7rem;
       }
@@ -205,6 +223,7 @@
       .model-controls {
         grid-column: 1 / -1;
         width: 100%;
+        min-width: 0;
         gap: 0.3rem;
       }
       #model-select {
@@ -225,11 +244,15 @@
         font-size: 0.72rem;
       }
       header .user-meta button {
+        width: 100%;
+        min-width: 0;
         min-height: 1.85rem;
-        padding: 0.28rem 0.45rem;
+        padding: 0.28rem 0.25rem;
         font-size: 0.68rem;
         line-height: 1;
         white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
       .session-bar {
         gap: 0.35rem;
@@ -257,6 +280,10 @@
         min-width: 2.35rem;
         font-size: 0.65rem;
       }
+    }
+    @media (max-width: 380px) {
+      header .brand { display: none; }
+      header .user-meta { max-width: 100%; }
     }
     #messages {
       flex: 1;
@@ -950,11 +977,17 @@
         <button class="ghost" id="searx-close" type="button">关闭</button>
       </div>
       <p class="settings-note">
-        只列出应用允许使用的三个聚合引擎。关闭全部引擎后，搜索会直接进入外部备用源。
+        自动读取当前 SearXNG 的全部 general 引擎；默认只开启 Bing、Wikipedia、Google CSE。换机器后可以逐个测试，再按该机器的网络情况启用。
       </p>
-      <div class="field" style="margin-top:0.8rem">
+      <div class="settings-grid" style="margin-top:0.8rem">
+        <div class="field">
+          <label for="searx-engine-filter">筛选引擎</label>
+          <input id="searx-engine-filter" placeholder="例如 google、duckduckgo" />
+        </div>
+        <div class="field">
         <label for="searx-test-query">单引擎测试关键词</label>
         <input id="searx-test-query" value="OpenAI" maxlength="200" />
+        </div>
       </div>
       <div class="searx-engine-list" id="searx-engine-list"></div>
       <div class="settings-actions">
@@ -1500,6 +1533,8 @@
         const row = document.createElement("div");
         row.className = "searx-engine-row";
         row.dataset.engine = engine.id;
+        row.dataset.search = [engine.id, engine.label, engine.shortcut]
+          .filter(Boolean).join(" ").toLowerCase();
 
         const toggle = document.createElement("label");
         toggle.className = "searx-engine-toggle";
@@ -1509,7 +1544,8 @@
         checkbox.value = engine.id;
         checkbox.checked = Boolean(engine.enabled);
         const name = document.createElement("span");
-        name.textContent = engine.label || engine.id;
+        name.textContent = (engine.label || engine.id) +
+          (engine.shortcut ? "  (!" + engine.shortcut + ")" : "");
         toggle.append(checkbox, name);
 
         const test = document.createElement("button");
@@ -1533,7 +1569,8 @@
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || "读取搜索设置失败");
         renderSearxEngines(data.engines || []);
-        setSearxStatus("");
+        $("searx-engine-filter").value = "";
+        setSearxStatus("已读取 " + (data.engines || []).length + " 个可配置引擎。");
       } catch (error) {
         renderSearxEngines([]);
         setSearxStatus(error.message, "bad");
@@ -1544,6 +1581,13 @@
     $("searx-close").onclick = () => $("searx-modal").classList.remove("open");
     $("searx-modal").addEventListener("click", (event) => {
       if (event.target === $("searx-modal")) $("searx-close").click();
+    });
+    $("searx-engine-filter").addEventListener("input", (event) => {
+      const keyword = event.target.value.trim().toLowerCase();
+      for (const row of $("searx-engine-list").children) {
+        row.style.display = !keyword || row.dataset.search.includes(keyword)
+          ? "grid" : "none";
+      }
     });
 
     $("searx-engine-list").addEventListener("click", async (event) => {
