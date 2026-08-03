@@ -22,19 +22,42 @@ server:
 outgoing:
   request_timeout: 8.0
   max_request_timeout: 15.0
-  pool_connections: 30
-  pool_maxsize: 15
+  pool_connections: 12
+  pool_maxsize: 8
 
-# 默认配置把多种通用/中文引擎关闭了；在本机聚合层显式启用。
+# 应用请求会显式传入 engines=，只聚合以下三个可配置上游。
 engines:
-  - name: google
-    inactive: false
   - name: bing
     disabled: false
-    base_url: "https://cn.bing.com"
+    base_url: "https://www.bing.com"
+  - name: wikipedia
+    disabled: false
+  - name: google cse
+    disabled: false
+
+  # 旧安装曾显式启用这些引擎；明确恢复为关闭，避免直接访问
+  # SearXNG general 分类时再次同时请求它们。
+  - name: google
+    disabled: true
   - name: baidu
-    disabled: false
+    disabled: true
   - name: sogou
-    disabled: false
+    disabled: true
   - name: 360search
-    disabled: false
+    disabled: true
+  - name: currency
+    disabled: true
+  - name: wikidata
+    disabled: true
+  - name: duckduckgo
+    disabled: true
+  - name: lingva
+    disabled: true
+  - name: startpage
+    disabled: true
+  - name: dictzone
+    disabled: true
+  - name: mymemory translated
+    disabled: true
+  - name: brave
+    disabled: true

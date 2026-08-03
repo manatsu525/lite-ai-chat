@@ -21,6 +21,17 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 
 PROVIDERS_FILE = DATA_DIR / "providers.json"
 _providers_lock = threading.Lock()
+SEARXNG_SETTINGS_FILE = DATA_DIR / "searxng.json"
+_searxng_settings_lock = threading.Lock()
+
+# 应用只允许这三个经过筛选的 SearXNG 引擎参与聚合。前端开关只是从
+# 这个白名单里选择，不会意外重新启用默认配置中的几十个上游。
+SEARXNG_ENGINES = (
+    {"id": "bing", "label": "Bing"},
+    {"id": "wikipedia", "label": "Wikipedia"},
+    {"id": "google cse", "label": "Google CSE"},
+)
+_SEARXNG_ENGINE_IDS = tuple(item["id"] for item in SEARXNG_ENGINES)
 
 # 首次运行兼容 .env；前端保存后由 providers.json 覆盖对应提供商。
 _ENV_PROVIDERS = (
@@ -191,6 +202,47 @@ def public_model_options():
 def default_model_id():
     options = public_model_options()
     return options[0]["id"] if options else MODEL_NAME
+
+
+def get_searxng_enabled_engines() -> list[str]:
+    """读取全局搜索引擎开关；文件损坏时安全回到三个默认引擎。"""
+    enabled = list(_SEARXNG_ENGINE_IDS)
+    try:
+        payload = json.loads(SEARXNG_SETTINGS_FILE.read_text())
+        raw = payload.get("enabled_engines")
+        if isinstance(raw, list):
+            enabled = [
+                engine
+                for engine in _SEARXNG_ENGINE_IDS
+                if engine in {str(value) for value in raw}
+            ]
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return enabled
+
+
+def searxng_settings_public() -> list[dict]:
+    enabled = set(get_searxng_enabled_engines())
+    return [
+        {**engine, "enabled": engine["id"] in enabled}
+        for engine in SEARXNG_ENGINES
+    ]
+
+
+def save_searxng_enabled_engines(engine_ids: list[str]) -> list[str]:
+    requested = {str(value) for value in engine_ids}
+    unknown = requested.difference(_SEARXNG_ENGINE_IDS)
+    if unknown:
+        raise ValueError("不支持的 SearXNG 引擎: " + ", ".join(sorted(unknown)))
+    enabled = [engine for engine in _SEARXNG_ENGINE_IDS if engine in requested]
+    with _searxng_settings_lock:
+        tmp = SEARXNG_SETTINGS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({"enabled_engines": enabled}, ensure_ascii=False, indent=2)
+        )
+        os.chmod(str(tmp), 0o600)
+        tmp.replace(SEARXNG_SETTINGS_FILE)
+    return enabled
 
 
 # 本地搜索 / 抓取

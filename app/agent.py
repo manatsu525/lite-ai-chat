@@ -1614,40 +1614,9 @@ async def run_agent_stream(
             yield _sse(done)
             continue
 
-        # 达上限仍想调工具：执行最后一轮工具后强制总结
+        # 当前模型调用只用于读取最后一轮工具结果；工具轮数已达上限时，
+        # 不能再执行它提出的新工具调用，否则 max_tool_rounds=4 会实际跑 5 轮。
         if tool_calls and round_i >= budget.max_tool_rounds:
-            tool_calls = _limit_external_tools(
-                tool_calls,
-                search_calls,
-                scrape_calls,
-                tool_calls_used,
-                budget,
-            )
-            if tool_calls:
-                tool_calls_used += len(tool_calls)
-                tool_events = await _apply_tool_calls(
-                    msgs,
-                    tool_calls,
-                    message,
-                    budget.max_search_results,
-                    scrape_state=scrape_state,
-                )
-                tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
-                    tool_events,
-                    tool_calls_used,
-                    scrape_calls,
-                )
-                tool_done = _chunk(model=use_model, cid=cid)
-                tool_done["status"] = {
-                    "type": "tool_done",
-                    "tools": [
-                        tc.get("function", {}).get("name", "?")
-                        for tc in tool_calls
-                    ],
-                    "round": round_i + 1,
-                    "trace_events": tool_events,
-                }
-                yield _sse(tool_done)
             msgs.append(
                 {
                     "role": "user",
@@ -1903,27 +1872,6 @@ async def run_agent_sync(
             continue
 
         if tool_calls and round_i >= budget.max_tool_rounds:
-            tool_calls = _limit_external_tools(
-                tool_calls,
-                search_calls,
-                scrape_calls,
-                tool_calls_used,
-                budget,
-            )
-            if tool_calls:
-                tool_calls_used += len(tool_calls)
-                tool_events = await _apply_tool_calls(
-                    msgs,
-                    tool_calls,
-                    message,
-                    budget.max_search_results,
-                    scrape_state=scrape_state,
-                )
-                tool_calls_used, scrape_calls = _refund_failed_scrape_quota(
-                    tool_events,
-                    tool_calls_used,
-                    scrape_calls,
-                )
             msgs.append(
                 {
                     "role": "user",

@@ -746,6 +746,41 @@
     }
     .model-option:hover { background: var(--bg); }
     .model-option input { width: auto; margin-top: 0.18rem; }
+    .searx-engine-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      margin-top: 0.8rem;
+    }
+    .searx-engine-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0.45rem 0.75rem;
+      align-items: center;
+      padding: 0.7rem 0.8rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    .searx-engine-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      min-width: 0;
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+    .searx-engine-toggle input { width: auto; }
+    .searx-engine-result {
+      grid-column: 1 / -1;
+      min-height: 1.1rem;
+      color: var(--muted);
+      font-size: 0.76rem;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+    .searx-engine-result.ok { color: var(--ok); }
+    .searx-engine-result.bad { color: var(--danger); }
     .account-list {
       display: flex;
       flex-direction: column;
@@ -822,6 +857,7 @@
         </div>
         <span id="who"></span>
         <button class="ghost" id="settings-btn" type="button">API / 模型</button>
+        <button class="ghost" id="searx-btn" type="button" style="display:none">搜索设置</button>
         <button class="ghost" id="admin-btn" type="button" style="display:none">账号管理</button>
         <button class="ghost" id="clear-btn" type="button">清空</button>
         <button class="ghost" id="logout-btn" type="button">退出</button>
@@ -904,6 +940,27 @@
       <p class="settings-note">
         API Key 只写入服务器的受限配置文件，页面不会读取或回显完整密钥。手填模型会通过最小聊天请求直接验证，不要求出现在 /models 中。
       </p>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="searx-modal" role="dialog" aria-modal="true">
+    <div class="settings-card">
+      <div class="settings-head">
+        <h2>SearXNG 搜索设置</h2>
+        <button class="ghost" id="searx-close" type="button">关闭</button>
+      </div>
+      <p class="settings-note">
+        只列出应用允许使用的三个聚合引擎。关闭全部引擎后，搜索会直接进入外部备用源。
+      </p>
+      <div class="field" style="margin-top:0.8rem">
+        <label for="searx-test-query">单引擎测试关键词</label>
+        <input id="searx-test-query" value="OpenAI" maxlength="200" />
+      </div>
+      <div class="searx-engine-list" id="searx-engine-list"></div>
+      <div class="settings-actions">
+        <button id="searx-save" type="button">保存引擎开关</button>
+      </div>
+      <div class="settings-status" id="searx-status"></div>
     </div>
   </div>
 
@@ -1034,6 +1091,7 @@
       $("chat-view").style.display = "flex";
       $("who").textContent = username || localStorage.getItem(USER_KEY) || "";
       $("settings-btn").style.display = isAdmin ? "" : "none";
+      $("searx-btn").style.display = isAdmin ? "" : "none";
       $("admin-btn").style.display = isAdmin ? "" : "none";
       await Promise.all([loadModels(), loadConversations()]);
       await resumeActiveJob();
@@ -1428,6 +1486,116 @@
       if (e.target === $("settings-modal")) $("settings-close").click();
     });
     $("provider-select").addEventListener("change", (e) => applyProvider(e.target.value));
+
+    function setSearxStatus(message, type = "") {
+      const status = $("searx-status");
+      status.textContent = message || "";
+      status.className = "settings-status " + type;
+    }
+
+    function renderSearxEngines(engines) {
+      const list = $("searx-engine-list");
+      list.innerHTML = "";
+      for (const engine of engines || []) {
+        const row = document.createElement("div");
+        row.className = "searx-engine-row";
+        row.dataset.engine = engine.id;
+
+        const toggle = document.createElement("label");
+        toggle.className = "searx-engine-toggle";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.className = "searx-engine-checkbox";
+        checkbox.value = engine.id;
+        checkbox.checked = Boolean(engine.enabled);
+        const name = document.createElement("span");
+        name.textContent = engine.label || engine.id;
+        toggle.append(checkbox, name);
+
+        const test = document.createElement("button");
+        test.type = "button";
+        test.className = "ghost searx-engine-test";
+        test.textContent = "单独测试";
+
+        const result = document.createElement("div");
+        result.className = "searx-engine-result";
+        row.append(toggle, test, result);
+        list.appendChild(row);
+      }
+    }
+
+    async function openSearxSettings() {
+      if (!isAdmin) return;
+      $("searx-modal").classList.add("open");
+      setSearxStatus("正在读取 SearXNG 设置…");
+      try {
+        const res = await api("/api/settings/searxng");
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "读取搜索设置失败");
+        renderSearxEngines(data.engines || []);
+        setSearxStatus("");
+      } catch (error) {
+        renderSearxEngines([]);
+        setSearxStatus(error.message, "bad");
+      }
+    }
+
+    $("searx-btn").onclick = openSearxSettings;
+    $("searx-close").onclick = () => $("searx-modal").classList.remove("open");
+    $("searx-modal").addEventListener("click", (event) => {
+      if (event.target === $("searx-modal")) $("searx-close").click();
+    });
+
+    $("searx-engine-list").addEventListener("click", async (event) => {
+      const button = event.target.closest(".searx-engine-test");
+      if (!button) return;
+      const row = button.closest(".searx-engine-row");
+      const engine = row && row.dataset.engine;
+      const result = row && row.querySelector(".searx-engine-result");
+      const query = $("searx-test-query").value.trim() || "OpenAI";
+      if (!engine || !result) return;
+      button.disabled = true;
+      result.textContent = "正在单独请求 " + engine + "…";
+      result.className = "searx-engine-result";
+      try {
+        const res = await api("/api/settings/searxng/test", {
+          method: "POST",
+          body: JSON.stringify({ engine, query }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "测试失败");
+        const first = (data.results || [])[0];
+        result.textContent = data.message + (first ? "；首条：" + first.title : "");
+        result.className = "searx-engine-result " + (data.ok ? "ok" : "bad");
+      } catch (error) {
+        result.textContent = error.message;
+        result.className = "searx-engine-result bad";
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    $("searx-save").onclick = async () => {
+      const enabled = Array.from(
+        $("searx-engine-list").querySelectorAll(".searx-engine-checkbox:checked")
+      ).map((item) => item.value);
+      $("searx-save").disabled = true;
+      setSearxStatus("正在保存…");
+      try {
+        const res = await api("/api/settings/searxng", {
+          method: "PUT",
+          body: JSON.stringify({ enabled_engines: enabled }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "保存失败");
+        renderSearxEngines(data.engines || []);
+        setSearxStatus("搜索引擎开关已保存，下一次搜索立即生效。", "ok");
+      } catch (error) {
+        setSearxStatus(error.message, "bad");
+      } finally {
+        $("searx-save").disabled = false;
+      }
+    };
 
     function setAccountStatus(message, type = "") {
       const status = $("account-status");
